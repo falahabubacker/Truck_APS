@@ -1,0 +1,709 @@
+import numpy as np
+import gymnasium as gym
+import carla
+import queue
+from collections import deque
+import time
+import os
+# import open3d as o3d
+# from matplotlib import cm
+import math
+
+NUM_RADARS = 10              # 3 on truck, 7 on trailer
+RADAR_RANGE = 4          # Max range of radars in meters
+MAX_POINTS_PER_SENSOR = 1  # Max detections to store per sensor
+
+def get_actor_pose(actor):
+    """Gets an actor's [x, y, yaw] pose as a numpy array."""
+    if not actor:
+        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    try:
+        t = actor.get_transform()
+    except Exception as e:
+        t = actor.transform
+    return np.array([
+        t.location.x,
+        t.location.y,
+        t.rotation.yaw
+    ], dtype=np.float32)
+
+def find_obj(world, keyword, offset=0):
+    env_objs = world.get_environment_objects()
+    objs = []
+
+    for env_obj in env_objs:
+        if keyword in env_obj.name:
+            _env_obj = env_obj
+            _env_obj.transform.location.z += offset
+            objs.append(_env_obj)
+
+    return objs
+
+class ParkingLotEnv(gym.Env):
+
+    def __init__(self):
+        self.client = carla.Client('localhost', 2000)
+        self.client.set_timeout(2.0)
+        self.world = self.client.get_world()
+
+        # region Getting vehicle and sensor blueprints
+        self.blueprint_library = self.world.get_blueprint_library()
+        self.truck_bp = self.blueprint_library.find("vehicle.daf.dafxf")
+        self.trailer_bp = self.blueprint_library.find("vehicle.trailer.trailer")
+        self.collision_bp = self.blueprint_library.find("sensor.other.collision")
+        self.radar_bp = self.blueprint_library.find("sensor.other.radar")
+        # endregion
+        
+        # region Getting truck, trailer and parking coordinates/spawn points
+        self.truck_spawn_point = find_obj(self.world, "truck_spawn", 0.1)[0]
+        self.trailer_spawn_point = find_obj(self.world, "trailer_spawn", 0.1)[0]
+        self.truck_parking_point = find_obj(self.world, "truck_parking")[0]
+        self.parking_point = find_obj(self.world, "trailer_parking")[0]
+        # endregion
+
+        self.env_boundary = find_obj(self.world, "env_boundary")[0]
+        self.env_boundary_vertices = [self.env_boundary.bounding_box.get_world_vertices(self.env_boundary.transform)[vertex] for vertex in range(0, 8, 2)]
+        
+        # region Action and Observation space
+        # Setting observation space [truck_pose, trailer_pose, parking_pose(trailer), truck_parking_pose, current_stage, 
+        #                            distance_to_target, angle_difference, jackknife_angle, phi(angle b/w truck n trailer)]
+        self.observation_space = gym.spaces.Dict(
+            {
+                # Agent's current pose: [x, y, yaw]
+                # "truck_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]), 
+                #                              high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]), 
+                #                              dtype=np.float32),
+                
+                # Trailer's current pose: [x, y, yaw]
+                # "trailer_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
+                #                                high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
+                #                                dtype=np.float32),
+                
+                # Target parking spot pose: [x, y, yaw]
+                # "parking_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
+                #                                high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
+                #                                dtype=np.float32),
+                
+                # Truck parking waypoint pose: [x, y, yaw]
+                # "truck_parking_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
+                #                                      high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
+                #                                      dtype=np.float32),
+                
+                # Current parking stage: 0 = positioning (go to truck_parking), 1 = backing (go to trailer_parking)
+                "current_stage": gym.spaces.Discrete(2),
+                
+                # Engineered Features for Better RL Performance
+                # Distance from trailer to parking spot (meters)
+                "distance_to_target": gym.spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
+                
+                # Angular difference between trailer and target orientation (degrees, -180 to 180)
+                "angle_difference": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                
+                # Jackknife angle between truck and trailer (degrees, -180 to 180)
+                "jackknife_angle": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                
+                # Angle from trailer back end to parking spot (degrees, -180 to 180)
+                "phi": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                
+                # Binary: 1 if trailer is in front of target, -1 if behind
+                # "position_indicator": gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
+                
+                # Binary: 1 if trailer facing right relative to target, -1 if left
+                # "orientation_indicator": gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
+                
+                # Lateral distance perpendicular to parking spot orientation (meters)
+                "parallel_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                
+                # Longitudinal distance along parking spot forward direction (meters)
+                "longitudinal_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                
+                # Radar data: [NUM_RADARS, MAX_POINTS_PER_SENSOR]
+                # Each value is the 'depth' (distance) of a detection
+                "radar_data": gym.spaces.Box(
+                    low=0, 
+                    high=RADAR_RANGE, 
+                    shape=(NUM_RADARS, 1), 
+                    dtype=np.float32
+                )
+            }
+        )
+
+        # Action space [steering and throttle]
+        self.action_space = gym.spaces.Box(low=np.array([-0.8, 0.04]), # Steering, Throttle (reduced to min)
+                                            high=np.array([0.8, 0.05]))  # Max throttle reduced to 0.02
+        # endregion
+
+        # region Constants and radar settings 
+        # Class state variables
+        self.actor_list = []
+        self.episode_number = 0  # Counter to track episodes
+        self.episode_offset = 0  # Offset when resuming from checkpoint
+        
+        # Stage tracking for 2-stage parking
+        self.current_stage = 0  # 0 = positioning, 1 = backing
+        self.stage_1_completed = False
+        
+        # Stage transition thresholds
+        self.stage_1_distance_threshold = 1.0  # meters
+        self.stage_1_angle_threshold = 15.0    # degrees
+
+        # Reward calculation parameters
+        self.min_distance = 1.0  # Minimum distance threshold (meters)
+        self.max_distance = 30.0  # Maximum distance threshold (meters)
+        
+        # Sensor data handling
+        self.radar_queues = [queue.Queue() for _ in range(NUM_RADARS)]
+        self.collision_truck_history = []
+        self.collision_trailer_history = []
+        
+        # Configure the radar blueprint
+        self.radar_bp.set_attribute('horizontal_fov', '60')
+        self.radar_bp.set_attribute('vertical_fov', '15')
+        self.radar_bp.set_attribute('range', f'{RADAR_RANGE}')
+
+        self.radar_data = None
+        # endregion
+
+        self.prev_distance = None
+        self.prev_angle_difference = None
+        self.prev_jackknife_angle = None
+
+    def reset(self, seed=None, options=None):
+
+        super().reset(seed=None)
+        
+        # Increment episode counter
+        self.episode_number += 1
+
+        # Destroy all actors
+        self.destroy_actors()
+        self.collision_truck_history.clear()
+        self.collision_trailer_history.clear()
+        for q in self.radar_queues:
+            while not q.empty():
+                q.get()
+        
+        # Reset stage tracking
+        self.current_stage = 0
+        self.stage_1_completed = False
+        
+        # region Spawn Truck, trailer, attach them and attach sensors and get first reading
+        spawn_transform = self.truck_spawn_point.transform
+        self.truck = self.world.try_spawn_actor(self.truck_bp, spawn_transform)
+        self.actor_list.append(self.truck)
+        print("Truck Spawned.")
+
+        # Spawn Trailer and Attach
+        trailer_spawn_base = self.truck_spawn_point.transform
+        new_trailer_location = trailer_spawn_base.location - trailer_spawn_base.get_forward_vector() * 4.0
+        trailer_transform = carla.Transform(new_trailer_location, trailer_spawn_base.rotation) # trailer_transform.location.z += 0.2 
+
+        self.trailer = self.world.try_spawn_actor(self.trailer_bp, trailer_transform) 
+        self.actor_list.append(self.trailer)
+        print("Trailer Spawned and Attached.")
+        
+        physics_control = self.truck.get_physics_control()
+        physics_control.max_rpm = 2000.0  # Lower = less power
+        self.truck.apply_physics_control(physics_control)
+        
+        self.world.tick()
+        time.sleep(0.1)
+
+        # Spawn and Attach Sensors
+        self.spawn_sensors()
+        
+        # Wait for the first radar data to arrive from all sensors
+        for i, q in enumerate(self.radar_queues):
+            while q.empty():
+                print(f"Waiting for radar sensor {i}...")
+                time.sleep(0.01)
+        
+        # endregion
+        
+        self.strt = time.perf_counter()
+
+        obs = self._get_observation()
+
+        self.prev_distance = float(obs["distance_to_target"][0])
+        self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
+        self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
+        
+        return obs, {}
+    
+    def spawn_sensors(self):
+        """Helper function to create and attach all sensors."""
+        
+        # Collision Sensors
+        collision_tf = carla.Transform() # Attach at vehicle origin
+        
+        col_sensor_truck = self.world.spawn_actor(self.collision_bp, collision_tf, attach_to=self.truck)
+        col_sensor_truck.listen(self.collision_truck_history.append)
+        self.actor_list.append(col_sensor_truck)
+        
+        col_sensor_trailer = self.world.spawn_actor(self.collision_bp, collision_tf, attach_to=self.trailer)
+        col_sensor_trailer.listen(lambda event: self.collision_trailer_history.append(event) if event.other_actor.type_id != 'static.unknown' else None)
+        self.actor_list.append(col_sensor_trailer)
+
+        truck_bb = self.truck.bounding_box
+        trailer_bb = self.trailer.bounding_box
+        
+        # Define Sensor Mount Points
+        # (x, y, z, yaw) relative to the vehicle
+        self.truck_radar_mounts = [
+            (truck_bb.extent.x - 0.75, 0.0, 0.5, 0.0),   # Front
+            (0.0, truck_bb.extent.y - 0.34, 0.5, 90.0),   # Right
+            (0.0, -truck_bb.extent.y + 0.34, 0.5, -90.0)  # Left
+        ]
+        self.trailer_radar_mounts = [
+            (-trailer_bb.extent.x * 2.1, 0.0, 0.5, 180.0), # Back Center
+            (-trailer_bb.extent.x * 0.7, trailer_bb.extent.y + 0.2, 0.5, 90.0),   # Right Front
+            (-trailer_bb.extent.x * 0.7, -trailer_bb.extent.y - 0.2, 0.5, -90.0),  # Left Front
+            (-trailer_bb.extent.x * 1.8, trailer_bb.extent.y + 0.2, 0.5, 90.0),   # Right Back
+            (-trailer_bb.extent.x * 1.8, -trailer_bb.extent.y - 0.2, 0.5, -90.0), # Left Back
+            (-trailer_bb.extent.x * 2.1, trailer_bb.extent.y + 0.0, 0.5, 180.0),  # Right Back Corner
+            (-trailer_bb.extent.x * 2.1, -trailer_bb.extent.y - 0.0, 0.5, 180.0)  # Left Back Corner
+        ]
+
+        # Radar Sensors
+        # 3 on the truck
+        for i, (x, y, z, yaw) in enumerate(self.truck_radar_mounts):
+            tf = carla.Transform(carla.Location(x=x, y=y, z=z), carla.Rotation(yaw=yaw))
+            sensor = self.world.spawn_actor(self.radar_bp, tf, attach_to=self.truck)
+            # sensor.listen(self.radar_queues[i].put)
+            sensor.listen(lambda radar_data, queue_id=i: self.radar_callback(radar_data, queue_id))
+            self.actor_list.append(sensor)
+            
+        # 7 on the trailer
+        for i, (x, y, z, yaw) in enumerate(self.trailer_radar_mounts):
+            j = i + 3 # Offset index for queues and list
+            tf = carla.Transform(carla.Location(x=x, y=y, z=z), carla.Rotation(yaw=yaw))
+            sensor = self.world.spawn_actor(self.radar_bp, tf, attach_to=self.trailer)
+            # sensor.listen(self.radar_queues[j].put)
+            sensor.listen(lambda radar_data, queue_id=j: self.radar_callback(radar_data, queue_id))
+            self.actor_list.append(sensor)
+            
+        print(f"Spawned {len(self.actor_list)} actors (vehicles + sensors).")
+
+    def _get_observation(self):
+        """Helper function to assemble the observation dictionary."""
+        # Get Pose Data
+        truck_pose = get_actor_pose(self.truck)
+        trailer_pose = get_actor_pose(self.trailer)
+        parking_pose = get_actor_pose(self.parking_point)
+        truck_parking_pose = get_actor_pose(self.truck_parking_point)
+        
+        actor_pose = trailer_pose  # For engineered features, we consider the trailer as the main actor
+        # Determine current target based on stage
+        if self.current_stage == 0:
+            # Stage 1: Target is truck_parking_point, measure from truck
+            target_pose = truck_parking_pose
+        else:
+            # Stage 2: Target is trailer_parking_point, measure from trailer
+            target_pose = parking_pose
+        
+        # Extract components
+        trailer_x, trailer_y, trailer_yaw = trailer_pose
+        truck_x, truck_y, truck_yaw = truck_pose
+        target_x, target_y, target_yaw = target_pose
+        actor_x, actor_y, actor_yaw = actor_pose
+        
+        # ===== Compute Engineered Features Based on Current Stage =====
+        # Always measure from trailer's back end (trailer is the primary actor in both stages)
+        
+        trailer_yaw_rad = np.deg2rad(trailer_yaw)
+        trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
+        trailer_bb = self.trailer.bounding_box
+        reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
+        
+        # 1. Distance to target
+        distance_to_target = np.linalg.norm(reference_point - target_pose[:2])
+        
+        # 2. Angle difference (actor orientation vs target orientation)
+        angle_diff = (actor_yaw - target_yaw + 180) % 360 - 180
+        
+        # 3. Jackknife angle (truck orientation vs trailer orientation)
+        jackknife = (truck_yaw - trailer_yaw + 180) % 360 - 180
+        
+        # 4. Phi: Angle from reference point to target (relative to actor's backward direction)
+        vec_to_target = np.array([target_pose[0] - reference_point[0], target_pose[1] - reference_point[1]])
+        world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
+        phi = (world_angle_to_target - actor_yaw + 180) % 360 - 180
+        
+        # 5. Position and distance calculations relative to target
+        target_yaw_rad = np.deg2rad(target_yaw)
+        target_forward = np.array([np.cos(target_yaw_rad), np.sin(target_yaw_rad)])
+        
+        # Vector from target to actor
+        to_actor = np.array([actor_x - target_x, actor_y - target_y])
+        
+        # Longitudinal distance (along target's forward direction)
+        longitudinal_dist = np.dot(to_actor, target_forward)
+        
+        # Parallel distance (perpendicular to target's forward direction)
+        target_right = np.array([-target_forward[1], target_forward[0]])
+        parallel_dist = np.dot(to_actor, target_right)
+        
+        # Process Radar Data
+        # Initialize radar data array, padding with max range
+        radar_obs = np.full((NUM_RADARS, MAX_POINTS_PER_SENSOR), RADAR_RANGE, dtype=np.float32)
+        
+        for i in range(NUM_RADARS):
+            # Get the latest data packet from this sensor's queue
+
+            while not self.radar_queues[i].empty():
+                try:
+                    self.radar_data = self.radar_queues[i].get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Get 'depth' (distance) for each detection
+            detections = np.array([d.depth for d in self.radar_data])
+            
+            # Clamp detections to max range
+            detections[detections > RADAR_RANGE] = RADAR_RANGE
+            
+            # Sort by distance (closest first)
+            detections = np.sort(detections)
+            
+            # Fill the observation array with the closest detections
+            num_detections = min(len(detections), MAX_POINTS_PER_SENSOR)
+            if num_detections > 0:
+                radar_obs[i, 0] = detections[0]
+
+        return {
+            # "truck_pose": truck_pose,
+            # "trailer_pose": trailer_pose,
+            # "parking_pose": parking_pose,
+            # "truck_parking_pose": truck_parking_pose,
+            "current_stage": self.current_stage,
+            "distance_to_target": np.array([distance_to_target], dtype=np.float32),
+            "angle_difference": np.array([angle_diff], dtype=np.float32),
+            "jackknife_angle": np.array([jackknife], dtype=np.float32),
+            "phi": np.array([phi], dtype=np.float32),
+            "parallel_distance": np.array([parallel_dist], dtype=np.float32),
+            "longitudinal_distance": np.array([longitudinal_dist], dtype=np.float32),
+            "radar_data": radar_obs
+        }
+    
+    def step(self, action):
+        """
+        Applies an action, ticks the world, and returns the next (obs, reward, done, info).
+        """
+        obs = self._get_observation()
+        
+        self.prev_distance = float(obs["distance_to_target"][0])
+        self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
+        self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
+
+        # 1. Apply action to self.truck
+        steer = float(action[0])
+        throttle = float(action[1]) / 1.5
+        
+        # Apply control with "fixed in reverse"
+        self.truck.apply_control(carla.VehicleControl(
+            steer=steer, 
+            throttle=throttle, 
+            # brake=brake, 
+            reverse=True
+        ))
+        
+        # 2. Tick the world to advance simulation
+        self.world.tick()
+        
+        # 3. Get the new observation
+        obs = self._get_observation()
+        
+        # 3.5 Check for stage transition (Stage 1 -> Stage 2)
+        if self.current_stage == 0 and not self.stage_1_completed:
+            trailer_pose = get_actor_pose(self.trailer)
+            truck_parking_pose = get_actor_pose(self.truck_parking_point)
+            
+            # Calculate distance from trailer to truck_parking
+            dist_to_truck_parking = np.linalg.norm(trailer_pose[:2] - truck_parking_pose[:2])
+            
+            # Calculate angle difference
+            trailer_yaw = trailer_pose[2]
+            truck_parking_yaw = truck_parking_pose[2]
+            yaw_diff = abs((trailer_yaw - truck_parking_yaw + 180) % 360 - 180)
+            
+            # Check if trailer reached the positioning point
+            if dist_to_truck_parking < self.stage_1_distance_threshold and yaw_diff < self.stage_1_angle_threshold:
+                self.current_stage = 1
+                self.stage_1_completed = True
+                print("\n*** STAGE 1 COMPLETE! Transitioning to Stage 2: Backing into Parking ***\n")
+        
+        # 4. Calculate reward
+        reward = float(self._calculate_reward(obs))
+        
+        # Display metrics as HUD (fixed position relative to spectator camera)
+        spectator = self.world.get_spectator()
+        spectator_transform = spectator.get_transform()
+        
+        # Position text in front and to the top-left of camera view
+        forward = spectator_transform.get_forward_vector()
+        right = spectator_transform.get_right_vector()
+        up = spectator_transform.get_up_vector()
+        
+        # Calculate HUD position (5m forward, 2m left, 2m up from camera)
+        hud_location = spectator_transform.location + forward * 5.0 - right * 2.0 + up * 2.0
+        
+        distance_to_target = float(obs["distance_to_target"][0])
+        phi = float(obs["phi"][0])
+        jackknife = float(obs["jackknife_angle"][0])
+        angle_diff_val = float(obs["angle_difference"][0])
+        stage_name = "Stage 1: Positioning" if self.current_stage == 0 else "Stage 2: Backing"
+        
+        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.1f}°\n\
+        Phi: {phi:.1f}°\nJackknife: {jackknife:.1f}°\nReward: {reward:.3f}."
+        self.world.debug.draw_string(
+            hud_location,
+            text,
+            draw_shadow=True,
+            color=carla.Color(r=0, g=50, b=0) if self.current_stage == 0 else carla.Color(r=255, g=165, b=0),
+            life_time=0.05,
+        )
+
+        terminated = False
+        truncated = False
+        info = {}
+
+        # Check for Crash (Terminated)
+        if len(self.collision_truck_history) > 0 or len(self.collision_trailer_history) > 0:
+            terminated = True
+            reward = -1.0  # Collision penalty
+            print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
+        
+        # Check how long the simulation has been running
+        if time.perf_counter() - self.strt > 150:
+            terminated = True
+            reward = -1.0  # Timeout penalty
+            print("Simulation run for too long!")
+
+        # Check for success (only in Stage 2)
+        if self.current_stage == 1:
+            trailer_pose_check = get_actor_pose(self.trailer)
+            parking_pose_check = get_actor_pose(self.parking_point)
+            dist_to_target = np.linalg.norm(trailer_pose_check[:2] - parking_pose_check[:2])
+            
+            trailer_yaw = trailer_pose_check[2]
+            parking_yaw = parking_pose_check[2]
+            yaw_diff = (trailer_yaw - parking_yaw + 180) % 360 - 180
+            
+            # If we are within 1 meter and 10 degrees, we win!
+            if dist_to_target < 1.0 and abs(yaw_diff) < 10.0:
+                terminated = True
+                reward = 1.0  # Big positive reward for success!
+                print("\n=== PARKING COMPLETE! ===\n")
+        
+        # 6. Info dict (optional)
+        info = {}
+        
+        return obs, reward, terminated, truncated, info
+    
+    def _calculate_jackknife_penalty(self, jackknife_angle):
+        # Exponentially growing penalty for jackknife angles > 70 degrees
+        abs_jackknife = abs(jackknife_angle)
+        jackknife_change = abs(self.prev_jackknife_angle) - abs_jackknife
+        penalty = 0.0
+        if abs_jackknife > 80 and jackknife_change < 0:
+            # Severe penalty
+            penalty = 0.1
+        return penalty
+
+    # region old reward function
+    def calculate_reward(self, obs):
+        
+        # Get pose data
+        trailer_pose = obs["trailer_pose"]
+        parking_pose = obs["parking_pose"]
+        truck_parking_pose = obs["truck_parking_pose"]
+        
+        # Determine target based on stage (trailer is always the actor)
+        if self.current_stage == 0:
+            # Stage 1: Trailer positioning to truck_parking
+            target_pose = truck_parking_pose
+        else:
+            # Stage 2: Trailer backing to trailer_parking
+            target_pose = parking_pose
+        
+        # Always measure from trailer's back end
+        trailer_x, trailer_y, trailer_yaw = trailer_pose
+        trailer_yaw_rad = np.deg2rad(trailer_yaw)
+        trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
+        trailer_bb = self.trailer.bounding_box
+        reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
+        actor_yaw = trailer_yaw
+        
+        # Calculate distance to target
+        distance = np.linalg.norm(reference_point - target_pose[:2])
+        
+        # Calculate angle difference
+        target_yaw = target_pose[2]
+        angle_diff = abs((actor_yaw - target_yaw + 180) % 360 - 180)
+        
+        # === Angle Reward (Equation 6) ===
+        angle_diff_rad = np.deg2rad(angle_diff)
+        if angle_diff <= 45:
+            angle_reward = abs(np.cos(angle_diff_rad))
+        else:
+            angle_reward = 1.5 * (1 - abs(angle_diff / 180.0))
+        # angle_reward = np.exp(-angle_diff / 30.0)  # Decay with angle error
+        
+        # === Distance Reward (Equation 7) ===
+        if distance <= self.min_distance:
+            distance_reward = 1.0
+        elif self.min_distance < distance < self.max_distance:
+            distance_reward = (self.max_distance - distance) / (self.max_distance - self.min_distance)
+        else:
+            distance_reward = 0.0
+        # distance_reward = np.exp(-distance / 10.0)  # Decay with distance
+
+        # === Jackknife Penalty ===
+        # jackknife_penalty = 0.0
+        # truck_yaw = truck_pose[2]
+        # trailer_yaw = trailer_pose[2]
+        # jackknife_angle = abs((truck_yaw - trailer_yaw + 180) % 360 - 180)
+        
+        # # Penalize jackknife angles > 80 degrees
+        # if jackknife_angle > 80:
+        #     jackknife_penalty = 0.5 * (jackknife_angle - 30) / 150.0
+        
+        jackknife_penalty = self._calculate_jackknife_penalty(obs["jackknife_angle"][0])
+
+        # === Stage Completion Bonus ===
+        stage_bonus = 0.0
+        if self.current_stage == 1 and not hasattr(self, '_stage_1_bonus_given'):
+            # Give one-time bonus for completing stage 1
+            stage_bonus = 50.0
+            self._stage_1_bonus_given = True
+        
+        # === Time Penalty ===
+        time_penalty = 0.001
+        
+        progress = 0.0
+        # Reward progress toward target
+        if hasattr(self, 'prev_distance'):
+            progress = 5.0 * (self.prev_distance - distance)
+        self.prev_distance = distance
+
+        # === Combined Reward ===
+        total_reward = 1.0 * angle_reward + 2.0 * distance_reward - jackknife_penalty - time_penalty  + progress + stage_bonus
+
+        return total_reward
+    # endregion
+
+    def _calculate_reward(self, obs):
+        # Extract scalars from observation arrays
+        distance = float(obs["distance_to_target"][0])
+        angle_diff = abs(float(obs["angle_difference"][0]))
+        jackknife = float(obs["jackknife_angle"][0])
+
+        distance = self.prev_distance - distance
+        angle_diff = abs(self.prev_angle_difference) - abs(angle_diff)
+        
+        # === Angle Reward ===
+        angle_reward = 35 * angle_diff
+
+        # === Distance Reward ===
+        distance_reward = 65 * distance
+
+        # Extra penalty
+        angle_reward *= 1.5 if angle_reward < 0 else 1
+        distance_reward *= 1.5 if distance_reward < 0 else 1
+
+        # === Jackknife Penalty ===
+        jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
+
+        # === Stage Completion Bonus ===
+        stage_bonus = 0.0
+        if self.current_stage == 1 and not hasattr(self, '_stage_1_bonus_given'):
+            # Give one-time bonus for completing stage 1
+            stage_bonus = 0.5
+            self._stage_1_bonus_given = True
+        
+        # === Time Penalty (scaled up for visibility) ===
+        time_penalty = 0.001  # Increased from 0.001 for better signal
+
+        # === Combined Reward (scaled up for better critic learning) ===
+        # Scale all components by 5x for stronger learning signal
+        total_reward = angle_reward + distance_reward - jackknife_penalty + stage_bonus # - time_penalty
+
+        return total_reward
+    
+    def destroy_actors(self):
+        """Helper function to destroy all spawned actors."""
+        print(f"Destroying {len(self.actor_list)} actors...")
+        for actor in self.actor_list:
+            if actor and actor.is_alive:
+                # Sensors must be stopped before destroying
+                if 'sensor' in actor.type_id:
+                    actor.stop()
+                actor.destroy()
+        self.actor_list.clear()
+    
+    def close(self):
+        """
+        Closes the environment and destroys all actors.
+        """
+        self.destroy_actors()
+        # --- FIX 2: Add a small delay to prevent sensor warnings ---
+        time.sleep(2.0)
+    
+    def radar_callback(self, radar_data, queue_id):
+
+        try:
+            self.radar_queues[queue_id].put(radar_data)
+            # region draw arrow and radar signal
+            # current_rot = radar_data.transform.rotation
+            # for detect in radar_data:
+            #     azi = math.degrees(detect.azimuth)
+            #     alt = math.degrees(detect.altitude)
+            #     fw_vec = carla.Vector3D(x=detect.depth - 0.25)
+            #     carla.Transform(
+            #         carla.Location(),
+            #         carla.Rotation(
+            #             pitch=current_rot.pitch + alt,
+            #             yaw=current_rot.yaw + azi,
+            #             roll=current_rot.roll)
+            #         ).transform(fw_vec)
+
+            #     norm_velocity = detect.velocity / 7.5 # range [-1, 1]
+            #     r = 255 # int(max(0.0, min(1.0, 1.0 - norm_velocity)) * 255.0)
+            #     g = 0 # int(max(0.0, min(1.0, 1.0 - abs(norm_velocity))) * 255.0)
+            #     b = 0 # int(abs(max(- 1.0, min(0.0, - 1.0 - norm_velocity))) * 255.0)
+                
+            #     self.world.debug.draw_point(radar_data.transform.location + fw_vec, size=0.1, color=carla.Color(r, g, b), life_time=0.05)
+
+            #     for sensor in self.world.get_actors().filter("sensor.other.radar*"):
+            #         sensor_transform = sensor.get_transform()
+
+            #         self.world.debug.draw_arrow(
+            #             sensor_transform.location,
+            #             sensor_transform.location + sensor_transform.get_forward_vector() * 1.3,
+            #             thickness=0.1,
+            #             arrow_size=0.1,
+            #             color=carla.Color(r=255, g=125, b=0),
+            #             life_time=0.01
+            #         )
+            # endregion
+
+        except Exception as e:
+            print(f"Error in radar callback: {e}")
+
+    def set_episode_offset(self, offset):
+        """Set the episode number offset when resuming from checkpoint."""
+        self.episode_offset = offset
+        self.episode_number = offset
+    
+    def get_episode_state(self):
+        """Get the current episode state for saving to checkpoint."""
+        return {
+            'episode_number': self.episode_number,
+            'episode_offset': self.episode_offset
+        }
+    
+    def restore_episode_state(self, state):
+        """Restore episode state from saved checkpoint."""
+        if state:
+            self.episode_number = state.get('episode_number', 0)
+            self.episode_offset = state.get('episode_offset', 0)
