@@ -45,6 +45,7 @@ class ParkingLotEnv(gym.Env):
         self.client = carla.Client('localhost', 2000)
         self.client.set_timeout(2.0)
         self.world = self.client.get_world()
+        self.world.get_spectator().set_transform(carla.Transform(carla.Location(125.234566, 46.220818, 26.722748), carla.Rotation(-74.851135, -90.247307, -0.000359)))
 
         # region Getting vehicle and sensor blueprints
         self.blueprint_library = self.world.get_blueprint_library()
@@ -68,27 +69,7 @@ class ParkingLotEnv(gym.Env):
         # Setting observation space [truck_pose, trailer_pose, parking_pose(trailer), truck_parking_pose, current_stage, 
         #                            distance_to_target, angle_difference, jackknife_angle, phi(angle b/w truck n trailer)]
         self.observation_space = gym.spaces.Dict(
-            {
-                # Agent's current pose: [x, y, yaw]
-                # "truck_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]), 
-                #                              high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]), 
-                #                              dtype=np.float32),
-                
-                # Trailer's current pose: [x, y, yaw]
-                # "trailer_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
-                #                                high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
-                #                                dtype=np.float32),
-                
-                # Target parking spot pose: [x, y, yaw]
-                # "parking_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
-                #                                high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
-                #                                dtype=np.float32),
-                
-                # Truck parking waypoint pose: [x, y, yaw]
-                # "truck_parking_pose": gym.spaces.Box(low=np.array([self.env_boundary_vertices[0].x, self.env_boundary_vertices[0].y, 0.0]),
-                #                                      high=np.array([self.env_boundary_vertices[3].x, self.env_boundary_vertices[3].y, 360.0]),
-                #                                      dtype=np.float32),
-                
+            {                
                 # Current parking stage: 0 = positioning (go to truck_parking), 1 = backing (go to trailer_parking)
                 "current_stage": gym.spaces.Discrete(2),
                 
@@ -104,12 +85,6 @@ class ParkingLotEnv(gym.Env):
                 
                 # Angle from trailer back end to parking spot (degrees, -180 to 180)
                 "phi": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
-                
-                # Binary: 1 if trailer is in front of target, -1 if behind
-                # "position_indicator": gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
-                
-                # Binary: 1 if trailer facing right relative to target, -1 if left
-                # "orientation_indicator": gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Lateral distance perpendicular to parking spot orientation (meters)
                 "parallel_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
@@ -186,6 +161,7 @@ class ParkingLotEnv(gym.Env):
         # Reset stage tracking
         self.current_stage = 0
         self.stage_1_completed = False
+        self._stage_1_bonus_given = False  # Reset bonus flag for new episode
         
         # region Spawn Truck, trailer, attach them and attach sensors and get first reading
         spawn_transform = self.truck_spawn_point.transform
@@ -308,18 +284,34 @@ class ParkingLotEnv(gym.Env):
         actor_x, actor_y, actor_yaw = actor_pose
         
         # ===== Compute Engineered Features Based on Current Stage =====
-        # Always measure from trailer's back end (trailer is the primary actor in both stages)
-        
-        trailer_yaw_rad = np.deg2rad(trailer_yaw)
-        trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
-        trailer_bb = self.trailer.bounding_box
-        reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
+        # FIX: In Stage 1, measure from TRUCK (since truck_parking is the truck's target)
+        # In Stage 2, measure from TRAILER (since trailer_parking is the trailer's target)
+        if self.current_stage == 0:
+            # Stage 1: Measure from truck's front
+            truck_yaw_rad = np.deg2rad(truck_yaw)
+            truck_forward = np.array([np.cos(truck_yaw_rad), np.sin(truck_yaw_rad)])
+            truck_bb = self.truck.bounding_box
+            reference_point = np.array([truck_x, truck_y]) + truck_forward * truck_bb.extent.x
+        else:
+            # Stage 2: Measure from trailer's back end
+            trailer_yaw_rad = np.deg2rad(trailer_yaw)
+            trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
+            trailer_bb = self.trailer.bounding_box
+            reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
         
         # 1. Distance to target
         distance_to_target = np.linalg.norm(reference_point - target_pose[:2])
         
         # 2. Angle difference (actor orientation vs target orientation)
-        angle_diff = (actor_yaw - target_yaw + 180) % 360 - 180
+        # IMPORTANT: Use the correct vehicle's orientation for the current stage
+        if self.current_stage == 0:
+            # Stage 0: truck should align with truck_parking
+            actor_yaw_for_angle = truck_yaw
+        else:
+            # Stage 1: trailer should align with trailer_parking
+            actor_yaw_for_angle = trailer_yaw
+        
+        angle_diff = (actor_yaw_for_angle - target_yaw + 180) % 360 - 180
         
         # 3. Jackknife angle (truck orientation vs trailer orientation)
         jackknife = (truck_yaw - trailer_yaw + 180) % 360 - 180
@@ -371,10 +363,6 @@ class ParkingLotEnv(gym.Env):
                 radar_obs[i, 0] = detections[0]
 
         return {
-            # "truck_pose": truck_pose,
-            # "trailer_pose": trailer_pose,
-            # "parking_pose": parking_pose,
-            # "truck_parking_pose": truck_parking_pose,
             "current_stage": self.current_stage,
             "distance_to_target": np.array([distance_to_target], dtype=np.float32),
             "angle_difference": np.array([angle_diff], dtype=np.float32),
@@ -397,11 +385,15 @@ class ParkingLotEnv(gym.Env):
 
         # 1. Apply action to self.truck
         steer = float(action[0])
-        throttle = float(action[1]) / 1.5
+        throttle = float(action[1]) / 1.5 # Removed /1.5 division that was making it too slow
+        
+        # IMPORTANT: When reversing, steering is inverted in CARLA
+        # Negate steering so that negative action = left turn, positive = right turn (consistent with forward driving)
+        steer_reversed = -steer  # Invert steering for reverse
         
         # Apply control with "fixed in reverse"
         self.truck.apply_control(carla.VehicleControl(
-            steer=steer, 
+            steer=steer_reversed, 
             throttle=throttle, 
             # brake=brake, 
             reverse=True
@@ -431,6 +423,13 @@ class ParkingLotEnv(gym.Env):
                 self.current_stage = 1
                 self.stage_1_completed = True
                 print("\n*** STAGE 1 COMPLETE! Transitioning to Stage 2: Backing into Parking ***\n")
+                
+                # CRITICAL FIX: Reset previous state values when transitioning stages
+                # Otherwise, delta calculation compares old reference point (truck) with new reference point (trailer)
+                # which causes corrupted reward signals at the transition
+                self.prev_distance = float(obs["distance_to_target"][0])
+                self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
+                self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
         
         # 4. Calculate reward
         reward = float(self._calculate_reward(obs))
@@ -501,132 +500,77 @@ class ParkingLotEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _calculate_jackknife_penalty(self, jackknife_angle):
-        # Exponentially growing penalty for jackknife angles > 70 degrees
         abs_jackknife = abs(jackknife_angle)
-        jackknife_change = abs(self.prev_jackknife_angle) - abs_jackknife
-        penalty = 0.0
-        if abs_jackknife > 80 and jackknife_change < 0:
-            # Severe penalty
-            penalty = 0.1
-        return penalty
-
-    # region old reward function
-    def calculate_reward(self, obs):
         
-        # Get pose data
-        trailer_pose = obs["trailer_pose"]
-        parking_pose = obs["parking_pose"]
-        truck_parking_pose = obs["truck_parking_pose"]
+        # Soft start: no penalty for small angles
+        if abs_jackknife < 20:
+            return 0.0
         
-        # Determine target based on stage (trailer is always the actor)
-        if self.current_stage == 0:
-            # Stage 1: Trailer positioning to truck_parking
-            target_pose = truck_parking_pose
-        else:
-            # Stage 2: Trailer backing to trailer_parking
-            target_pose = parking_pose
+        # Progressive penalty for moderate jackknife (20-60°)
+        if abs_jackknife < 60:
+            # Linear growth: starts at 0 at 20°, reaches ~0.2 at 60°
+            penalty = (abs_jackknife - 20) * 0.005
+            return penalty
         
-        # Always measure from trailer's back end
-        trailer_x, trailer_y, trailer_yaw = trailer_pose
-        trailer_yaw_rad = np.deg2rad(trailer_yaw)
-        trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
-        trailer_bb = self.trailer.bounding_box
-        reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
-        actor_yaw = trailer_yaw
+        # Heavy penalty for severe jackknife (>60°)
+        # Exponential growth: 0.2 at 60°, 0.5 at 70°, 1.0 at 80°+
+        penalty = 0.2 + (abs_jackknife - 60) * 0.04
         
-        # Calculate distance to target
-        distance = np.linalg.norm(reference_point - target_pose[:2])
-        
-        # Calculate angle difference
-        target_yaw = target_pose[2]
-        angle_diff = abs((actor_yaw - target_yaw + 180) % 360 - 180)
-        
-        # === Angle Reward (Equation 6) ===
-        angle_diff_rad = np.deg2rad(angle_diff)
-        if angle_diff <= 45:
-            angle_reward = abs(np.cos(angle_diff_rad))
-        else:
-            angle_reward = 1.5 * (1 - abs(angle_diff / 180.0))
-        # angle_reward = np.exp(-angle_diff / 30.0)  # Decay with angle error
-        
-        # === Distance Reward (Equation 7) ===
-        if distance <= self.min_distance:
-            distance_reward = 1.0
-        elif self.min_distance < distance < self.max_distance:
-            distance_reward = (self.max_distance - distance) / (self.max_distance - self.min_distance)
-        else:
-            distance_reward = 0.0
-        # distance_reward = np.exp(-distance / 10.0)  # Decay with distance
-
-        # === Jackknife Penalty ===
-        # jackknife_penalty = 0.0
-        # truck_yaw = truck_pose[2]
-        # trailer_yaw = trailer_pose[2]
-        # jackknife_angle = abs((truck_yaw - trailer_yaw + 180) % 360 - 180)
-        
-        # # Penalize jackknife angles > 80 degrees
-        # if jackknife_angle > 80:
-        #     jackknife_penalty = 0.5 * (jackknife_angle - 30) / 150.0
-        
-        jackknife_penalty = self._calculate_jackknife_penalty(obs["jackknife_angle"][0])
-
-        # === Stage Completion Bonus ===
-        stage_bonus = 0.0
-        if self.current_stage == 1 and not hasattr(self, '_stage_1_bonus_given'):
-            # Give one-time bonus for completing stage 1
-            stage_bonus = 50.0
-            self._stage_1_bonus_given = True
-        
-        # === Time Penalty ===
-        time_penalty = 0.001
-        
-        progress = 0.0
-        # Reward progress toward target
-        if hasattr(self, 'prev_distance'):
-            progress = 5.0 * (self.prev_distance - distance)
-        self.prev_distance = distance
-
-        # === Combined Reward ===
-        total_reward = 1.0 * angle_reward + 2.0 * distance_reward - jackknife_penalty - time_penalty  + progress + stage_bonus
-
-        return total_reward
-    # endregion
+        return min(penalty, 1.0)  # Cap at 1.0 to prevent explosions
 
     def _calculate_reward(self, obs):
-        # Extract scalars from observation arrays
+        # Extract current state scalars
         distance = float(obs["distance_to_target"][0])
         angle_diff = abs(float(obs["angle_difference"][0]))
         jackknife = float(obs["jackknife_angle"][0])
 
-        distance = self.prev_distance - distance
-        angle_diff = abs(self.prev_angle_difference) - abs(angle_diff)
+        # Calculate deltas (improvement)
+        distance_delta = self.prev_distance - distance
+        angle_delta = abs(self.prev_angle_difference) - abs(angle_diff)
         
-        # === Angle Reward ===
-        angle_reward = 35 * angle_diff
-
-        # === Distance Reward ===
-        distance_reward = 65 * distance
-
-        # Extra penalty
-        angle_reward *= 1.5 if angle_reward < 0 else 1
-        distance_reward *= 1.5 if distance_reward < 0 else 1
-
-        # === Jackknife Penalty ===
+        # === 1. Delta-Based Rewards (improvement) ===
+        # Reward improvement, but don't over-penalize necessary detours
+        angle_improvement = 20 * angle_delta  # Reduced from 35
+        distance_improvement = 30 * distance_delta  # Reduced from 65
+        
+        # Symmetric scaling (removed 1.5x penalty bias)
+        # Small asymmetry is OK, but 1.5x was too harsh
+        angle_improvement *= 1.2 if angle_improvement < 0 else 1.0
+        distance_improvement *= 1.2 if distance_improvement < 0 else 1.0
+        
+        # === 2. State-Based Rewards (being in good position) ===
+        # Reward for being close to target (exponential decay)
+        # At distance=1m: +1.0, at distance=5m: +0.2, at distance=10m: +0.05
+        proximity_reward = np.exp(-distance / 5.0)
+        
+        # Reward for good alignment (but clip to prevent negative penalties from dominating)
+        # At 0°: +1.0, at 45°: +0.5, at 90°: 0.0, at 180°: -0.3 (clipped to prevent collapse)
+        alignment_raw = np.cos(np.deg2rad(angle_diff))
+        alignment_reward = np.clip(alignment_raw, -0.3, 1.0)  # Clamp negative to -0.3 max
+        
+        # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
 
-        # === Stage Completion Bonus ===
+        # === 4. Stage Completion Bonus ===
         stage_bonus = 0.0
-        if self.current_stage == 1 and not hasattr(self, '_stage_1_bonus_given'):
-            # Give one-time bonus for completing stage 1
-            stage_bonus = 5
+        if self.current_stage == 1 and not self._stage_1_bonus_given:
+            stage_bonus = 100  # Increased for better signal
             self._stage_1_bonus_given = True
         
-        # === Time Penalty (scaled up for visibility) ===
-        time_penalty = 0.001  # Increased from 0.001 for better signal
+        # === 5. Small time penalty to encourage efficiency ===
+        time_penalty = 0.01
 
-        # === Combined Reward (scaled up for better critic learning) ===
-        # Scale all components by 5x for stronger learning signal
-        total_reward = angle_reward + distance_reward - jackknife_penalty + stage_bonus # - time_penalty
+        # === Combined Reward ===
+        # Balance improvement (delta) with baseline state rewards
+        total_reward = (
+            angle_improvement +           # Reward for improving angle
+            distance_improvement +        # Reward for getting closer
+            proximity_reward * 5.0 +     # Reward for being close (baseline)
+            alignment_reward * 3.0 +     # Reward for being aligned (baseline)
+            stage_bonus -                # Big bonus for stage completion
+            jackknife_penalty -          # Penalty for jackknifing
+            time_penalty                 # Small efficiency penalty
+        )
 
         return total_reward
     

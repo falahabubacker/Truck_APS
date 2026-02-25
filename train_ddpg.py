@@ -2,7 +2,7 @@ from stable_baselines3 import DDPG
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env import ParkingLotEnv
+from parking_env_2 import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
@@ -100,8 +100,8 @@ def main():
         env,
         norm_obs=True,         # Normalize observations to ~N(0,1)
         norm_reward=True,      # Normalize rewards (scaled 5x in env)
-        clip_obs=1.0,         # Clip normalized obs to [-10, 10]
-        clip_reward=1.0,      # Clip normalized rewards to [-10, 10]
+        clip_obs=10.0,         # Clip normalized obs to [-10, 10]
+        clip_reward=10.0,      # Clip normalized rewards to [-10, 10]
         gamma=GAMMA
     )
     

@@ -100,8 +100,8 @@ def main():
         env,
         norm_obs=True,         # Normalize observations to ~N(0,1)
         norm_reward=True,      # Normalize rewards (scaled 5x in env)
-        clip_obs=1.0,         # Clip normalized obs to [-10, 10]
-        clip_reward=1.0,      # Clip normalized rewards to [-10, 10]
+        clip_obs=10,         # Clip normalized obs to [-10, 10]
+        clip_reward=10,      # Clip normalized rewards to [-10, 10]
         gamma=GAMMA
     )
     
