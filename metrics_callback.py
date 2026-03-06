@@ -137,6 +137,15 @@ class CustomMetricsCallback(BaseCallback):
                 self.episode_phis = []
                 self.episode_stages = []
                 self.episode_cumulative_reward = 0.0
+                self.episode_reward_components = {
+                    "total_reward": 0.0,
+                    "angle_improvement": 0.0,
+                    "distance_improvement": 0.0,
+                    "proximity_reward": 0.0,
+                    "alignment_reward": 0.0,
+                    "stage_bonus": 0.0,
+                    "jackknife_penalty": 0.0,
+                    "time_penalty": 0.0}
                 # Reset per-episode reward component accumulators
                 for k in self.episode_reward_components.keys():
                     self.episode_reward_components[k] = 0.0
@@ -148,7 +157,6 @@ class CustomMetricsCallback(BaseCallback):
             # Indices depend on observation structure: [truck_pose(3), trailer_pose(3), parking_pose(3), 
             # truck_parking_pose(3), current_stage(1), distance(1), angle_diff(1), jackknife(1), phi(1), 
             # parallel_dist(1), longitudinal_dist(1), radar_data(30)]
-            # Total: 3+3+3+3+1+1+1+1+1+1+1+30 = 48
             
             distance = obs[0][13] if len(obs[0]) > 13 else None  # distance_to_target
             angle_diff = obs[0][14] if len(obs[0]) > 14 else None  # angle_difference
