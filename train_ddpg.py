@@ -88,12 +88,7 @@ def main():
         return env
 
     env = DummyVecEnv([make_env])
-    
-    # Load episode state if resuming from checkpoint (before normalization wrapper)
-    episode_state = load_episode_state(EPISODE_STATE_FILE)
-    if episode_state:
-        env.envs[0].unwrapped.restore_episode_state(episode_state)
-    
+
     # Add observation normalization (critical for DDPG with mixed-scale features)
     # Radar data (0-100), distances (0-50), angles (0-180) need normalization
     env = VecNormalize(
@@ -104,6 +99,11 @@ def main():
         clip_reward=10.0,      # Clip normalized rewards to [-10, 10]
         gamma=GAMMA
     )
+    
+    # Load episode state if resuming from checkpoint (before normalization wrapper)
+    episode_state = load_episode_state(EPISODE_STATE_FILE)
+    if episode_state:
+        env.envs[0].unwrapped.restore_episode_state(episode_state)
     
     print("--- Environment Created and Wrapped ---")
     print(f"Observation Space (Flattened): {env.observation_space}")
