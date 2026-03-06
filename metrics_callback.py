@@ -55,13 +55,14 @@ class CustomMetricsCallback(BaseCallback):
         if len(rewards) > 0:
             self.episode_cumulative_reward += rewards[0]
             self.episode_reward_components["total_reward"] += rewards[0]
-            self.episode_reward_components["angle_improvement"] += info["reward_comp"].get("angle_improvement")
-            self.episode_reward_components["distance_improvement"] += info["reward_comp"].get("distance_improvement")
-            self.episode_reward_components["proximity_reward"] += info["reward_comp"].get("proximity_reward")
-            self.episode_reward_components["alignment_reward"] += info["reward_comp"].get("alignment_reward")
-            self.episode_reward_components["stage_bonus"] += info["reward_comp"].get("stage_bonus")
-            self.episode_reward_components["jackknife_penalty"] += info["reward_comp"].get("jackknife_penalty")
-            self.episode_reward_components["time_penalty"] += info["reward_comp"].get("time_penalty")
+            # Use safe defaults when reading reward components from the env info
+            self.episode_reward_components["angle_improvement"] += info["reward_comp"].get("angle_improvement", 0.0)
+            self.episode_reward_components["distance_improvement"] += info["reward_comp"].get("distance_improvement", 0.0)
+            self.episode_reward_components["proximity_reward"] += info["reward_comp"].get("proximity_reward", 0.0)
+            self.episode_reward_components["alignment_reward"] += info["reward_comp"].get("alignment_reward", 0.0)
+            self.episode_reward_components["stage_bonus"] += info["reward_comp"].get("stage_bonus", 0.0)
+            self.episode_reward_components["jackknife_penalty"] += info["reward_comp"].get("jackknife_penalty", 0.0)
+            self.episode_reward_components["time_penalty"] += info["reward_comp"].get("time_penalty", 0.0)
             
             # Check if episode is done
             if self.locals.get('dones', [False])[0]:
@@ -70,6 +71,37 @@ class CustomMetricsCallback(BaseCallback):
                 
                 # Log episode statistics with episode number as the x-axis
                 self.logger.record('rollout/ep_cum_rew', self.episode_cumulative_reward)
+
+                # Log reward and its components (safe, avoid division by zero)
+                calls = max(1, self.n_calls)
+                ang_imp_total = self.episode_reward_components.get("angle_improvement", 0.0)
+                dist_imp_total = self.episode_reward_components.get("distance_improvement", 0.0)
+                prox_total = self.episode_reward_components.get("proximity_reward", 0.0)
+                align_total = self.episode_reward_components.get("alignment_reward", 0.0)
+                stage_bonus_total = self.episode_reward_components.get("stage_bonus", 0.0)
+                jackknife_total = self.episode_reward_components.get("jackknife_penalty", 0.0)
+                time_pen_total = self.episode_reward_components.get("time_penalty", 0.0)
+                total_reward = self.episode_reward_components.get("total_reward", 0.0)
+
+                self.logger.record('reward/total', total_reward)
+                self.logger.record('reward/angle_improvement_total', ang_imp_total)
+                self.logger.record('reward/angle_improvement_mean_per_call', ang_imp_total / calls)
+                self.logger.record('reward/distance_improvement_total', dist_imp_total)
+                self.logger.record('reward/distance_improvement_mean_per_call', dist_imp_total / calls)
+                self.logger.record('reward/proximity_total', prox_total)
+                self.logger.record('reward/alignment_total', align_total)
+                self.logger.record('reward/stage_bonus_total', stage_bonus_total)
+                self.logger.record('reward/jackknife_penalty_total', jackknife_total)
+                self.logger.record('reward/time_penalty_total', time_pen_total)
+
+                # Track stage 2 successes (if any episode stage reached 2)
+                if len(self.episode_stages) > 0:
+                    stage_2_reached = any(s == 2 for s in self.episode_stages)
+                    if stage_2_reached:
+                        self.stage_2_successes += 1
+                    self.logger.record('progress/stage_2_success_rate',
+                                     self.stage_2_successes / max(1, current_episode))
+                
                 
                 if len(self.episode_distances) > 0:
                     self.logger.record('metrics/mean_distance', np.mean(self.episode_distances))
@@ -105,6 +137,9 @@ class CustomMetricsCallback(BaseCallback):
                 self.episode_phis = []
                 self.episode_stages = []
                 self.episode_cumulative_reward = 0.0
+                # Reset per-episode reward component accumulators
+                for k in self.episode_reward_components.keys():
+                    self.episode_reward_components[k] = 0.0
         
         # Track metrics during episode (from flattened observation)
         obs = self.locals.get('new_obs', None)
