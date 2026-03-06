@@ -14,6 +14,17 @@ class CustomMetricsCallback(BaseCallback):
         self.episode_jackknifes = []
         self.episode_phis = []
         self.episode_stages = []
+        # region individual reward components
+        self.episode_reward_components = {
+            "total_reward": 0.0,
+            "angle_improvement": 0.0,
+            "distance_improvement": 0.0,
+            "proximity_reward": 0.0,
+            "alignment_reward": 0.0,
+            "stage_bonus": 0.0,
+            "jackknife_penalty": 0.0,
+            "time_penalty": 0.0}
+        # endregion
         self.episode_cumulative_reward = 0.0
         self.stage_1_completions = 0
         self.stage_2_successes = 0
@@ -34,30 +45,23 @@ class CustomMetricsCallback(BaseCallback):
         except (AttributeError, IndexError):
             current_episode = 0
         
-        # region newly added
-        # Linearly decay exploration noise over time
-        # if (
-        #     self.noise_sigma_init is not None
-        #     and self.noise_sigma_final is not None
-        #     and self.noise_decay_steps
-        #     and hasattr(self.model, "action_noise")
-        # ):
-        #     progress = min(1.0, self.num_timesteps / float(self.noise_decay_steps))
-        #     sigma = self.noise_sigma_init + (self.noise_sigma_final - self.noise_sigma_init) * progress
-        #     noise = self.model.action_noise
-        #     if hasattr(noise, "sigma"):
-        #         noise.sigma = sigma * np.ones_like(noise.sigma)
-        #     self.logger.record("train/noise_sigma", float(sigma))
-        # endregion
-        
         # Accumulate reward for the current step
         rewards = self.locals.get('rewards', [0.0])
-        if len(rewards) > 0:
-            self.episode_cumulative_reward += rewards[0]
-        
+
         # Get the current observation from the environment
         if len(self.locals.get('infos', [])) > 0:
             info = self.locals['infos'][0]
+        
+        if len(rewards) > 0:
+            self.episode_cumulative_reward += rewards[0]
+            self.episode_reward_components["total_reward"] += rewards[0]
+            self.episode_reward_components["angle_improvement"] += info["reward_comp"].get("angle_improvement")
+            self.episode_reward_components["distance_improvement"] += info["reward_comp"].get("distance_improvement")
+            self.episode_reward_components["proximity_reward"] += info["reward_comp"].get("proximity_reward")
+            self.episode_reward_components["alignment_reward"] += info["reward_comp"].get("alignment_reward")
+            self.episode_reward_components["stage_bonus"] += info["reward_comp"].get("stage_bonus")
+            self.episode_reward_components["jackknife_penalty"] += info["reward_comp"].get("jackknife_penalty")
+            self.episode_reward_components["time_penalty"] += info["reward_comp"].get("time_penalty")
             
             # Check if episode is done
             if self.locals.get('dones', [False])[0]:

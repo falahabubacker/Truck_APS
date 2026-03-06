@@ -367,6 +367,7 @@ class ParkingLotEnv(gym.Env):
         Applies an action, ticks the world, and returns the next (obs, reward, done, info).
         """
         obs = self._get_observation()
+        info = {}
         
         self.prev_distance = float(obs["distance_to_target"][0])
         self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
@@ -421,7 +422,7 @@ class ParkingLotEnv(gym.Env):
                 self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
         
         # 4. Calculate reward
-        reward = float(self._calculate_reward(obs))
+        reward, info = self._calculate_reward(obs)
         
         # Display metrics as HUD (fixed position relative to spectator camera)
         spectator = self.world.get_spectator()
@@ -453,7 +454,6 @@ class ParkingLotEnv(gym.Env):
 
         terminated = False
         truncated = False
-        info = {}
 
         # Check for Crash (Terminated)
         if len(self.collision_truck_history) > 0 or len(self.collision_trailer_history) > 0:
@@ -482,9 +482,6 @@ class ParkingLotEnv(gym.Env):
                 terminated = True
                 reward = 10.0  # Big positive reward for success!
                 print("\n=== PARKING COMPLETE! ===\n")
-        
-        # 6. Info dict (optional)
-        info = {}
         
         return obs, reward, terminated, truncated, info
     
@@ -530,12 +527,12 @@ class ParkingLotEnv(gym.Env):
         # === 2. State-Based Rewards (being in good position) ===
         # Reward for being close to target (exponential decay)
         # At distance=1m: +1.0, at distance=5m: +0.2, at distance=10m: +0.05
-        proximity_reward = np.exp(-distance / 5.0)
+        proximity_reward = np.exp(-distance / 5.0) * 5.0
         
         # Reward for good alignment (but clip to prevent negative penalties from dominating)
         # At 0°: +1.0, at 45°: +0.5, at 90°: 0.0, at 180°: -0.3 (clipped to prevent collapse)
         alignment_raw = np.cos(np.deg2rad(angle_diff))
-        alignment_reward = np.clip(alignment_raw, -0.3, 1.0)  # Clamp negative to -0.3 max
+        alignment_reward = np.clip(alignment_raw, -0.3, 1.0) * 3.0  # Clamp negative to -0.3 max
         
         # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
@@ -552,16 +549,27 @@ class ParkingLotEnv(gym.Env):
         # === Combined Reward ===
         # Balance improvement (delta) with baseline state rewards
         total_reward = (
-            # angle_improvement +           # Reward for improving angle
+            angle_improvement +           # Reward for improving angle
             distance_improvement +        # Reward for getting closer
-            proximity_reward * 5.0 +     # Reward for being close (baseline)
-            # alignment_reward * 3.0 +     # Reward for being aligned (baseline)
+            proximity_reward +     # Reward for being close (baseline)
+            alignment_reward +     # Reward for being aligned (baseline)
             stage_bonus -                # Big bonus for stage completion
             jackknife_penalty -          # Penalty for jackknifing
             time_penalty                 # Small efficiency penalty
         )
 
-        return total_reward
+        info = {}
+        info["reward_comp"] = {
+            "angle_improvement": angle_improvement,
+            "distance_improvement": distance_improvement,
+            "proximity_reward": proximity_reward,
+            "alignment_reward": alignment_reward,
+            "stage_bonus": stage_bonus,
+            "jackknife_penalty": jackknife_penalty,
+            "time_penalty": time_penalty
+        }
+        
+        return total_reward, info
     
     def destroy_actors(self):
         """Helper function to destroy all spawned actors."""
