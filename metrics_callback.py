@@ -66,6 +66,7 @@ class CustomMetricsCallback(BaseCallback):
             
             # Check if episode is done
             if self.locals.get('dones', [False])[0]:
+                print(self.n_calls)
                 # Log episode number as a reference metric
                 self.logger.record('episode_number', current_episode)
                 
@@ -84,6 +85,7 @@ class CustomMetricsCallback(BaseCallback):
                 total_reward = self.episode_reward_components.get("total_reward", 0.0)
 
                 self.logger.record('reward/total', total_reward)
+                self.logger.record('reward/mean_reward_per_call', total_reward / calls)
                 self.logger.record('reward/angle_improvement_total', ang_imp_total)
                 self.logger.record('reward/angle_improvement_mean_per_call', ang_imp_total / calls)
                 self.logger.record('reward/distance_improvement_total', dist_imp_total)

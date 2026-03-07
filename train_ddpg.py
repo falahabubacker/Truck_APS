@@ -134,8 +134,7 @@ def main():
     callback = CallbackList([checkpoint_callback, metrics_callback])
     
     n_actions = env.action_space.shape[-1]
-    # Ornstein-Uhlenbeck noise parameters from Table 6 (DDPG)
-    # μ=0, σ=0.3, θ=0.15, dt=0.01
+    # OU Noise model
     action_noise = OrnsteinUhlenbeckActionNoise(
         mean=np.zeros(n_actions),  # μ = 0
         sigma=NOISE_SIGMA * np.ones(n_actions),  # σ = 0.3
@@ -143,10 +142,7 @@ def main():
         dt=NOISE_DT  # dt = 0.01
     )
 
-    # Network architectures from the provided images:
-    # Actor (second image): Input(18) -> 256 -> 128 -> 64 -> Output(2, tanh)
-    # Critic (first image): Complex architecture with separate state/action processing
-    # Note: SB3 uses a simpler concatenated architecture, so we approximate with [256, 256]
+    # The actor and critic network architecture
     policy_kwargs = dict(
         net_arch=dict(
             pi=[256, 128, 64],      # Actor: 3 hidden layers (from second image)
@@ -154,8 +150,7 @@ def main():
         )
     )
 
-    # 3. Initialize or Load the DDPG Model
-    # Check if there's an existing checkpoint to resume from
+    # Initialize or Load the DDPG Model
     checkpoint_path = os.path.join(MODEL_SAVE_PATH, "ddpg_parking_final.zip")
     
     resume_training = False
