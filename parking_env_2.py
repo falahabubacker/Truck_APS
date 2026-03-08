@@ -39,6 +39,9 @@ def find_obj(world, keyword, offset=0):
 
     return objs
 
+def min_max(value, o_min, o_max, n_min=0, n_max=1):
+    return (((value - o_min) / (o_max - o_min)) * (n_max - n_min)) + n_min
+
 class ParkingLotEnv(gym.Env):
 
     def __init__(self):
@@ -75,28 +78,28 @@ class ParkingLotEnv(gym.Env):
                 
                 # Engineered Features for Better RL Performance
                 # Distance from trailer to parking spot (meters)
-                "distance_to_target": gym.spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
+                "distance_to_target": gym.spaces.Box(low=0.01, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Angular difference between trailer and target orientation (degrees, -180 to 180)
-                "angle_difference": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "angle_difference": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Jackknife angle between truck and trailer (degrees, -180 to 180)
-                "jackknife_angle": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "jackknife_angle": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Angle from trailer back end to parking spot (degrees, -180 to 180)
-                "phi": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "phi": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Lateral distance perpendicular to parking spot orientation (meters)
-                "parallel_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                "parallel_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Longitudinal distance along parking spot forward direction (meters)
-                "longitudinal_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                "longitudinal_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Radar data: [NUM_RADARS, MAX_POINTS_PER_SENSOR]
                 # Each value is the 'depth' (distance) of a detection
                 "radar_data": gym.spaces.Box(
                     low=0, 
-                    high=RADAR_RANGE, 
+                    high=1.0, 
                     shape=(NUM_RADARS, 1), 
                     dtype=np.float32
                 )
@@ -283,44 +286,28 @@ class ParkingLotEnv(gym.Env):
         target_x, target_y, target_yaw = target_pose
         actor_x, actor_y, actor_yaw = actor_pose
         
-        # ===== Compute Engineered Features Based on Current Stage =====
-        # FIX: In Stage 1, measure from TRUCK (since truck_parking is the truck's target)
-        # In Stage 2, measure from TRAILER (since trailer_parking is the trailer's target)
-        if self.current_stage == 0:
-            # Stage 1: Measure from truck's front
-            truck_yaw_rad = np.deg2rad(truck_yaw)
-            truck_forward = np.array([np.cos(truck_yaw_rad), np.sin(truck_yaw_rad)])
-            truck_bb = self.truck.bounding_box
-            reference_point = np.array([truck_x, truck_y]) + truck_forward * truck_bb.extent.x
-        else:
-            # Stage 2: Measure from trailer's back end
-            trailer_yaw_rad = np.deg2rad(trailer_yaw)
-            trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
-            trailer_bb = self.trailer.bounding_box
-            reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
+        trailer_yaw_rad = np.deg2rad(trailer_yaw)
+        trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
+        trailer_bb = self.trailer.bounding_box
+        reference_point = np.array([trailer_x, trailer_y]) + trailer_backward * trailer_bb.extent.x * 2.1
         
         # 1. Distance to target
         distance_to_target = np.linalg.norm(reference_point - target_pose[:2])
+        distance_to_target = min_max(distance_to_target, 0, 40)
         
-        # 2. Angle difference (actor orientation vs target orientation)
-        # IMPORTANT: Use the correct vehicle's orientation for the current stage
-        if self.current_stage == 0:
-            # Stage 0: truck should align with truck_parking
-            actor_yaw_for_angle = truck_yaw
-        else:
-            # Stage 1: trailer should align with trailer_parking
-            actor_yaw_for_angle = trailer_yaw
-        
-        angle_diff = (actor_yaw_for_angle - target_yaw + 180) % 360 - 180
+        angle_diff = (trailer_yaw - target_yaw + 180) % 360 - 180
+        angle_diff = min_max(angle_diff, -180, 180)
         
         # 3. Jackknife angle (truck orientation vs trailer orientation)
         jackknife = (truck_yaw - trailer_yaw + 180) % 360 - 180
-        
+        jackknife = min_max(jackknife, -180, 180)
+
         # 4. Phi: Angle from reference point to target (relative to actor's backward direction)
         vec_to_target = np.array([target_pose[0] - reference_point[0], target_pose[1] - reference_point[1]])
         world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
         phi = (world_angle_to_target - actor_yaw + 180) % 360 - 180
-        
+        phi = min_max(phi, -180, 180)
+
         # 5. Position and distance calculations relative to target
         target_yaw_rad = np.deg2rad(target_yaw)
         target_forward = np.array([np.cos(target_yaw_rad), np.sin(target_yaw_rad)])
@@ -330,11 +317,13 @@ class ParkingLotEnv(gym.Env):
         
         # Longitudinal distance (along target's forward direction)
         longitudinal_dist = np.dot(to_actor, target_forward)
+        longitudinal_dist = min_max(longitudinal_dist, 0, 40)
         
         # Parallel distance (perpendicular to target's forward direction)
         target_right = np.array([-target_forward[1], target_forward[0]])
         parallel_dist = np.dot(to_actor, target_right)
-        
+        parallel_dist = min_max(parallel_dist, 0, 40)
+
         # Process Radar Data
         # Initialize radar data array, padding with max range
         radar_obs = np.full((NUM_RADARS, MAX_POINTS_PER_SENSOR), RADAR_RANGE, dtype=np.float32)
@@ -353,6 +342,7 @@ class ParkingLotEnv(gym.Env):
             
             # Clamp detections to max range
             detections[detections > RADAR_RANGE] = RADAR_RANGE
+            detections = min_max(detections, 0, 4)
             
             # Sort by distance (closest first)
             detections = np.sort(detections)
@@ -378,6 +368,7 @@ class ParkingLotEnv(gym.Env):
         Applies an action, ticks the world, and returns the next (obs, reward, done, info).
         """
         obs = self._get_observation()
+        info = {}
         
         self.prev_distance = float(obs["distance_to_target"][0])
         self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
@@ -432,9 +423,40 @@ class ParkingLotEnv(gym.Env):
                 self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
         
         # 4. Calculate reward
-        reward = float(self._calculate_reward(obs))
+        reward, info = self._calculate_reward(obs)
         
-        # Display metrics as HUD (fixed position relative to spectator camera)
+        terminated = False
+        truncated = False
+
+        # Check for Crash (Terminated)
+        if len(self.collision_truck_history) > 0 or len(self.collision_trailer_history) > 0:
+            terminated = True
+            reward = -1.0  # Collision penalty
+            print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
+        
+        # Check how long the simulation has been running
+        if time.perf_counter() - self.strt > 150:
+            terminated = True
+            reward = -1.0  # Timeout penalty
+            print("Simulation run for too long!")
+
+        # Check for success (only in Stage 2)
+        if self.current_stage == 1:
+            trailer_pose_check = get_actor_pose(self.trailer)
+            parking_pose_check = get_actor_pose(self.parking_point)
+            dist_to_target = np.linalg.norm(trailer_pose_check[:2] - parking_pose_check[:2])
+            
+            trailer_yaw = trailer_pose_check[2]
+            parking_yaw = parking_pose_check[2]
+            yaw_diff = (trailer_yaw - parking_yaw + 180) % 360 - 180
+            
+            # If we are within 1 meter and 10 degrees, we win!
+            if dist_to_target < 1.0 and abs(yaw_diff) < 10.0:
+                terminated = True
+                reward = 1.0  # Big positive reward for success!
+                print("\n=== PARKING COMPLETE! ===\n")
+        
+        # region Display metrics as HUD (fixed position relative to spectator camera)
         spectator = self.world.get_spectator()
         spectator_transform = spectator.get_transform()
         
@@ -461,41 +483,7 @@ class ParkingLotEnv(gym.Env):
             color=carla.Color(r=0, g=50, b=0) if self.current_stage == 0 else carla.Color(r=255, g=165, b=0),
             life_time=0.05,
         )
-
-        terminated = False
-        truncated = False
-        info = {}
-
-        # Check for Crash (Terminated)
-        if len(self.collision_truck_history) > 0 or len(self.collision_trailer_history) > 0:
-            terminated = True
-            reward = -10.0  # Collision penalty
-            print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
-        
-        # Check how long the simulation has been running
-        if time.perf_counter() - self.strt > 150:
-            terminated = True
-            reward = -10.0  # Timeout penalty
-            print("Simulation run for too long!")
-
-        # Check for success (only in Stage 2)
-        if self.current_stage == 1:
-            trailer_pose_check = get_actor_pose(self.trailer)
-            parking_pose_check = get_actor_pose(self.parking_point)
-            dist_to_target = np.linalg.norm(trailer_pose_check[:2] - parking_pose_check[:2])
-            
-            trailer_yaw = trailer_pose_check[2]
-            parking_yaw = parking_pose_check[2]
-            yaw_diff = (trailer_yaw - parking_yaw + 180) % 360 - 180
-            
-            # If we are within 1 meter and 10 degrees, we win!
-            if dist_to_target < 1.0 and abs(yaw_diff) < 10.0:
-                terminated = True
-                reward = 10.0  # Big positive reward for success!
-                print("\n=== PARKING COMPLETE! ===\n")
-        
-        # 6. Info dict (optional)
-        info = {}
+        # endregion
         
         return obs, reward, terminated, truncated, info
     
@@ -519,7 +507,7 @@ class ParkingLotEnv(gym.Env):
         return min(penalty, 1.0)  # Cap at 1.0 to prevent explosions
 
     def _calculate_reward(self, obs):
-        # Extract current state scalars
+
         distance = float(obs["distance_to_target"][0])
         angle_diff = abs(float(obs["angle_difference"][0]))
         jackknife = float(obs["jackknife_angle"][0])
@@ -529,50 +517,54 @@ class ParkingLotEnv(gym.Env):
         angle_delta = abs(self.prev_angle_difference) - abs(angle_diff)
         
         # === 1. Delta-Based Rewards (improvement) ===
-        # Reward improvement, but don't over-penalize necessary detours
-        angle_improvement = 20 * angle_delta  # Reduced from 35
-        distance_improvement = 30 * distance_delta  # Reduced from 65
-        
-        # Symmetric scaling (removed 1.5x penalty bias)
-        # Small asymmetry is OK, but 1.5x was too harsh
-        angle_improvement *= 1.2 if angle_improvement < 0 else 1.0
-        distance_improvement *= 1.2 if distance_improvement < 0 else 1.0
+        angle_delta *= 4e4
+        distance_delta *= 4e5
+        angle_improvement = max(0.15 * angle_delta, 0.1 * angle_delta)
+        distance_improvement = max(0.1 * distance_delta, 0.3 * distance_delta)
         
         # === 2. State-Based Rewards (being in good position) ===
-        # Reward for being close to target (exponential decay)
-        # At distance=1m: +1.0, at distance=5m: +0.2, at distance=10m: +0.05
-        proximity_reward = np.exp(-distance / 5.0)
+        proximity_reward = 1.5 * (-0.6 * distance + 0.4)
         
         # Reward for good alignment (but clip to prevent negative penalties from dominating)
-        # At 0°: +1.0, at 45°: +0.5, at 90°: 0.0, at 180°: -0.3 (clipped to prevent collapse)
-        alignment_raw = np.cos(np.deg2rad(angle_diff))
-        alignment_reward = np.clip(alignment_raw, -0.3, 1.0)  # Clamp negative to -0.3 max
+        alignment_reward = 0.3 * np.cos(0.8 * np.deg2rad(angle_diff))
         
         # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
 
         # === 4. Stage Completion Bonus ===
         stage_bonus = 0.0
-        if self.current_stage == 1 and not self._stage_1_bonus_given:
-            stage_bonus = 100  # Increased for better signal
-            self._stage_1_bonus_given = True
         
         # === 5. Small time penalty to encourage efficiency ===
         time_penalty = 0.01
 
         # === Combined Reward ===
-        # Balance improvement (delta) with baseline state rewards
         total_reward = (
-            angle_improvement +           # Reward for improving angle
-            distance_improvement +        # Reward for getting closer
-            proximity_reward * 5.0 +     # Reward for being close (baseline)
-            alignment_reward * 3.0 +     # Reward for being aligned (baseline)
-            stage_bonus -                # Big bonus for stage completion
-            jackknife_penalty -          # Penalty for jackknifing
-            time_penalty                 # Small efficiency penalty
+            angle_improvement +
+            distance_improvement +
+            proximity_reward +
+            alignment_reward +
+            stage_bonus -
+            jackknife_penalty -
+            time_penalty
         )
 
-        return total_reward
+        info = {}
+        info["other"] = {
+            "angle_delta": angle_delta,
+            "distance_delta": distance_delta,
+        }
+        info["reward_comp"] = {
+            "total_reward": total_reward,
+            "angle_improvement": angle_improvement,
+            "distance_improvement": distance_improvement,
+            "proximity_reward": proximity_reward,
+            "alignment_reward": alignment_reward,
+            "stage_bonus": stage_bonus,
+            "jackknife_penalty": jackknife_penalty,
+            "time_penalty": time_penalty
+        }
+        
+        return total_reward, info
     
     def destroy_actors(self):
         """Helper function to destroy all spawned actors."""

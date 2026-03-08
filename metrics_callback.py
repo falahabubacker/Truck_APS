@@ -14,6 +14,8 @@ class CustomMetricsCallback(BaseCallback):
         self.episode_jackknifes = []
         self.episode_phis = []
         self.episode_stages = []
+        self.highest_ep_rew = 0.0
+        self.lowest_ep_rew = float('inf')
         # region individual reward components
         self.episode_reward_components = {
             "total_reward": 0.0,
@@ -28,6 +30,7 @@ class CustomMetricsCallback(BaseCallback):
         self.episode_cumulative_reward = 0.0
         self.stage_1_completions = 0
         self.stage_2_successes = 0
+        self.episode_step_count = 0
         # region newly added
         self.noise_sigma_init = noise_sigma_init
         self.noise_sigma_final = noise_sigma_final
@@ -47,12 +50,16 @@ class CustomMetricsCallback(BaseCallback):
         
         # Accumulate reward for the current step
         rewards = self.locals.get('rewards', [0.0])
+        
+        self.highest_ep_rew = max(rewards[0], self.highest_ep_rew)
+        self.lowest_ep_rew = min(rewards[0], self.lowest_ep_rew)
 
         # Get the current observation from the environment
         if len(self.locals.get('infos', [])) > 0:
             info = self.locals['infos'][0]
-        
+
         if len(rewards) > 0:
+            self.episode_step_count += 1
             self.episode_cumulative_reward += rewards[0]
             self.episode_reward_components["total_reward"] += rewards[0]
             # Use safe defaults when reading reward components from the env info
@@ -66,15 +73,20 @@ class CustomMetricsCallback(BaseCallback):
             
             # Check if episode is done
             if self.locals.get('dones', [False])[0]:
-                print(self.n_calls)
+                print(f"Last Angle diff: {info['other'].get('angle_delta', None)}")
+                print(f"Highest episode reward value: {self.highest_ep_rew}")
+                print(f"Lowest episode reward value: {self.lowest_ep_rew}")
+                self.highest_ep_rew = 0.0
+                self.lowest_ep_rew = float('inf')
                 # Log episode number as a reference metric
                 self.logger.record('episode_number', current_episode)
                 
                 # Log episode statistics with episode number as the x-axis
                 self.logger.record('rollout/ep_cum_rew', self.episode_cumulative_reward)
+                self.logger.record('rollout/ep_steps', self.episode_step_count)
 
                 # Log reward and its components (safe, avoid division by zero)
-                calls = max(1, self.n_calls)
+                ep_steps = max(1, self.episode_step_count)
                 ang_imp_total = self.episode_reward_components.get("angle_improvement", 0.0)
                 dist_imp_total = self.episode_reward_components.get("distance_improvement", 0.0)
                 prox_total = self.episode_reward_components.get("proximity_reward", 0.0)
@@ -84,17 +96,19 @@ class CustomMetricsCallback(BaseCallback):
                 time_pen_total = self.episode_reward_components.get("time_penalty", 0.0)
                 total_reward = self.episode_reward_components.get("total_reward", 0.0)
 
-                self.logger.record('reward/total', total_reward)
-                self.logger.record('reward/mean_reward_per_call', total_reward / calls)
-                self.logger.record('reward/angle_improvement_total', ang_imp_total)
-                self.logger.record('reward/angle_improvement_mean_per_call', ang_imp_total / calls)
-                self.logger.record('reward/distance_improvement_total', dist_imp_total)
-                self.logger.record('reward/distance_improvement_mean_per_call', dist_imp_total / calls)
-                self.logger.record('reward/proximity_total', prox_total)
-                self.logger.record('reward/alignment_total', align_total)
-                self.logger.record('reward/stage_bonus_total', stage_bonus_total)
-                self.logger.record('reward/jackknife_penalty_total', jackknife_total)
-                self.logger.record('reward/time_penalty_total', time_pen_total)
+                # self.logger.record('reward/total', total_reward)
+                self.logger.record('reward/avg_step', total_reward / ep_steps)
+                # self.logger.record('reward/angle_delta_total', ang_imp_total)
+                self.logger.record('reward/angle_delta_step', ang_imp_total / ep_steps)
+                # self.logger.record('reward/dist_delta_total', dist_imp_total)
+                self.logger.record('reward/dist_delta_step', dist_imp_total / ep_steps)
+                # self.logger.record('reward/proximity_total', prox_total)
+                self.logger.record('reward/proximity_step', prox_total / ep_steps)
+                # self.logger.record('reward/alignment_total', align_total)
+                self.logger.record('reward/alignment_step', align_total / ep_steps)
+                # self.logger.record('reward/stage_bonus_total', stage_bonus_total)
+                # self.logger.record('reward/jackknife_total', jackknife_total)
+                # self.logger.record('reward/time_penalty_total', time_pen_total)
 
                 # Track stage 2 successes (if any episode stage reached 2)
                 if len(self.episode_stages) > 0:
@@ -138,6 +152,7 @@ class CustomMetricsCallback(BaseCallback):
                 self.episode_jackknifes = []
                 self.episode_phis = []
                 self.episode_stages = []
+                self.episode_step_count = 0
                 self.episode_cumulative_reward = 0.0
                 self.episode_reward_components = {
                     "total_reward": 0.0,

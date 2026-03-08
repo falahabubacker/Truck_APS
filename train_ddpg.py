@@ -2,7 +2,7 @@ from stable_baselines3 import DDPG
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env_3 import ParkingLotEnv
+from parking_env_2 import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
@@ -89,16 +89,15 @@ def main():
 
     env = DummyVecEnv([make_env])
 
-    # Add observation normalization (critical for DDPG with mixed-scale features)
-    # Radar data (0-100), distances (0-50), angles (0-180) need normalization
-    env = VecNormalize(
-        env,
-        norm_obs=True,         # Normalize observations to ~N(0,1)
-        norm_reward=True,      # Normalize rewards (scaled 5x in env)
-        clip_obs=10.0,         # Clip normalized obs to [-10, 10]
-        clip_reward=10.0,      # Clip normalized rewards to [-10, 10]
-        gamma=GAMMA
-    )
+    # Normalize observations and reward
+    # env = VecNormalize(
+    #     env,
+    #     norm_obs=True,         # Normalize observations to ~N(0,1)
+    #     norm_reward=False,      # Normalize rewards (scaled 5x in env)
+    #     clip_obs=10.0,         # Clip normalized obs to [-1.0, 1.0]
+    #     # clip_reward=10.0,      # Clip normalized rewards to [-1.0, 1.0]
+    #     gamma=GAMMA
+    # )
     
     # Load episode state if resuming from checkpoint (before normalization wrapper)
     episode_state = load_episode_state(EPISODE_STATE_FILE)
@@ -210,8 +209,9 @@ def main():
         model.save(os.path.join(MODEL_SAVE_PATH, "ddpg_parking_final"))
         # Save episode state for future resuming
         save_episode_state(env, EPISODE_STATE_FILE)
-        # Save normalization statistics for deployment
-        env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
+        # Save normalization statistics only when VecNormalize is enabled
+        if isinstance(env, VecNormalize):
+            env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
         print(f"Final model saved to {MODEL_SAVE_PATH}")
         env.close() # This will call destroy_actors()
 

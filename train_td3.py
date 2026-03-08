@@ -215,8 +215,9 @@ def main():
         model.save(os.path.join(MODEL_SAVE_PATH, "td3_parking_final"))
         # Save episode state for future resuming
         save_episode_state(env, EPISODE_STATE_FILE)
-        # Save normalization statistics for deployment
-        env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
+        # Save normalization statistics only when VecNormalize is enabled
+        if isinstance(env, VecNormalize):
+            env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
         print(f"Final model saved to {MODEL_SAVE_PATH}")
         env.close() # This will call destroy_actors()
 

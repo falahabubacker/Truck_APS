@@ -2,19 +2,14 @@ import numpy as np
 import gymnasium as gym
 import carla
 import queue
-from collections import deque
 import time
-import os
-# import open3d as o3d
-# from matplotlib import cm
-import math
 
 NUM_RADARS = 10              # 3 on truck, 7 on trailer
 RADAR_RANGE = 4          # Max range of radars in meters
-MAX_POINTS_PER_SENSOR = 1  # Max detections to store per sensor
+MAX_POINTS_PER_SENSOR = 1
 
 def get_actor_pose(actor):
-    """Gets an actor's [x, y, yaw] pose as a numpy array."""
+    # Gets an actor's [x, y, yaw] pose as a numpy array
     if not actor:
         return np.array([0.0, 0.0, 0.0], dtype=np.float32)
     try:
@@ -424,34 +419,6 @@ class ParkingLotEnv(gym.Env):
         # 4. Calculate reward
         reward, info = self._calculate_reward(obs)
         
-        # Display metrics as HUD (fixed position relative to spectator camera)
-        spectator = self.world.get_spectator()
-        spectator_transform = spectator.get_transform()
-        
-        # Position text in front and to the top-left of camera view
-        forward = spectator_transform.get_forward_vector()
-        right = spectator_transform.get_right_vector()
-        up = spectator_transform.get_up_vector()
-        
-        # Calculate HUD position (5m forward, 2m left, 2m up from camera)
-        hud_location = spectator_transform.location + forward * 5.0 - right * 2.0 + up * 2.0
-        
-        distance_to_target = float(obs["distance_to_target"][0])
-        phi = float(obs["phi"][0])
-        jackknife = float(obs["jackknife_angle"][0])
-        angle_diff_val = float(obs["angle_difference"][0])
-        stage_name = "Stage 1: Positioning" if self.current_stage == 0 else "Stage 2: Backing"
-        
-        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.1f}°\n\
-        Phi: {phi:.1f}°\nJackknife: {jackknife:.1f}°\nReward: {reward:.3f}."
-        self.world.debug.draw_string(
-            hud_location,
-            text,
-            draw_shadow=True,
-            color=carla.Color(r=0, g=50, b=0) if self.current_stage == 0 else carla.Color(r=255, g=165, b=0),
-            life_time=0.05,
-        )
-
         terminated = False
         truncated = False
 
@@ -482,6 +449,34 @@ class ParkingLotEnv(gym.Env):
                 terminated = True
                 reward = 10.0  # Big positive reward for success!
                 print("\n=== PARKING COMPLETE! ===\n")
+        
+        # Display metrics as HUD (fixed position relative to spectator camera)
+        spectator = self.world.get_spectator()
+        spectator_transform = spectator.get_transform()
+        
+        # Position text in front and to the top-left of camera view
+        forward = spectator_transform.get_forward_vector()
+        right = spectator_transform.get_right_vector()
+        up = spectator_transform.get_up_vector()
+        
+        # Calculate HUD position (5m forward, 2m left, 2m up from camera)
+        hud_location = spectator_transform.location + forward * 5.0 - right * 2.0 + up * 2.0
+        
+        distance_to_target = float(obs["distance_to_target"][0])
+        phi = float(obs["phi"][0])
+        jackknife = float(obs["jackknife_angle"][0])
+        angle_diff_val = float(obs["angle_difference"][0])
+        stage_name = "Stage 1: Positioning" if self.current_stage == 0 else "Stage 2: Backing"
+        
+        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.1f}°\n\
+        Phi: {phi:.1f}°\nJackknife: {jackknife:.1f}°\nReward: {reward:.3f}."
+        self.world.debug.draw_string(
+            hud_location,
+            text,
+            draw_shadow=True,
+            color=carla.Color(r=0, g=50, b=0) if self.current_stage == 0 else carla.Color(r=255, g=165, b=0),
+            life_time=0.05,
+        )
         
         return obs, reward, terminated, truncated, info
     
@@ -560,6 +555,7 @@ class ParkingLotEnv(gym.Env):
 
         info = {}
         info["reward_comp"] = {
+            "total_reward": total_reward,
             "angle_improvement": angle_improvement,
             "distance_improvement": distance_improvement,
             "proximity_reward": proximity_reward,
