@@ -42,6 +42,9 @@ def find_obj(world, keyword, offset=0):
 def min_max(value, o_min, o_max, n_min=0, n_max=1):
     return (((value - o_min) / (o_max - o_min)) * (n_max - n_min)) + n_min
 
+def clamp(value, minimum, maximum):
+    return max(minimum, min(value, maximum))
+
 class ParkingLotEnv(gym.Env):
 
     def __init__(self):
@@ -271,7 +274,6 @@ class ParkingLotEnv(gym.Env):
         parking_pose = get_actor_pose(self.parking_point)
         truck_parking_pose = get_actor_pose(self.truck_parking_point)
         
-        actor_pose = trailer_pose  # For engineered features, we consider the trailer as the main actor
         # Determine current target based on stage
         if self.current_stage == 0:
             # Stage 1: Target is truck_parking_point, measure from truck
@@ -284,7 +286,6 @@ class ParkingLotEnv(gym.Env):
         trailer_x, trailer_y, trailer_yaw = trailer_pose
         truck_x, truck_y, truck_yaw = truck_pose
         target_x, target_y, target_yaw = target_pose
-        actor_x, actor_y, actor_yaw = actor_pose
         
         trailer_yaw_rad = np.deg2rad(trailer_yaw)
         trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
@@ -305,7 +306,7 @@ class ParkingLotEnv(gym.Env):
         # 4. Phi: Angle from reference point to target (relative to actor's backward direction)
         vec_to_target = np.array([target_pose[0] - reference_point[0], target_pose[1] - reference_point[1]])
         world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
-        phi = (world_angle_to_target - actor_yaw + 180) % 360 - 180
+        phi = (world_angle_to_target - trailer_yaw + 180) % 360 - 180
         phi = min_max(phi, -180, 180)
 
         # 5. Position and distance calculations relative to target
@@ -313,7 +314,7 @@ class ParkingLotEnv(gym.Env):
         target_forward = np.array([np.cos(target_yaw_rad), np.sin(target_yaw_rad)])
         
         # Vector from target to actor
-        to_actor = np.array([actor_x - target_x, actor_y - target_y])
+        to_actor = np.array([trailer_x - target_x, trailer_y - target_y])
         
         # Longitudinal distance (along target's forward direction)
         longitudinal_dist = np.dot(to_actor, target_forward)
@@ -474,8 +475,14 @@ class ParkingLotEnv(gym.Env):
         angle_diff_val = float(obs["angle_difference"][0])
         stage_name = "Stage 1: Positioning" if self.current_stage == 0 else "Stage 2: Backing"
         
-        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.1f}°\n\
-        Phi: {phi:.1f}°\nJackknife: {jackknife:.1f}°\nReward: {reward:.3f}."
+        rew_comp = info["reward_comp"]
+        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.2f}°\n\
+        Phi: {phi:.2f}°\nJackknife: {jackknife:.2f}°\nReward: {reward:.3f}.\n\
+        Angle_Rew: {rew_comp['alignment_reward']:.3f}\n\
+        Angle_Imp_Rew: {rew_comp['angle_improvement']:.3f}\n\
+        Dist_Rew: {rew_comp['proximity_reward']:.3f}\n\
+        Dist_Imp_Rew: {rew_comp['distance_improvement']:.3f}\n\
+        Jackknife_Pen: {rew_comp['jackknife_penalty']:.3f}"
         self.world.debug.draw_string(
             hud_location,
             text,
@@ -488,29 +495,17 @@ class ParkingLotEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _calculate_jackknife_penalty(self, jackknife_angle):
-        abs_jackknife = abs(jackknife_angle)
-        
-        # Soft start: no penalty for small angles
-        if abs_jackknife < 20:
-            return 0.0
-        
-        # Progressive penalty for moderate jackknife (20-60°)
-        if abs_jackknife < 60:
-            # Linear growth: starts at 0 at 20°, reaches ~0.2 at 60°
-            penalty = (abs_jackknife - 20) * 0.005
-            return penalty
-        
-        # Heavy penalty for severe jackknife (>60°)
-        # Exponential growth: 0.2 at 60°, 0.5 at 70°, 1.0 at 80°+
-        penalty = 0.2 + (abs_jackknife - 60) * 0.04
-        
-        return min(penalty, 1.0)  # Cap at 1.0 to prevent explosions
+        if jackknife_angle > 0.73 or jackknife_angle < 0.26:
+            return -0.65 * np.cos(7.075 * jackknife_angle - 3.537)
+        else:
+            return 0
 
     def _calculate_reward(self, obs):
 
         distance = float(obs["distance_to_target"][0])
         angle_diff = abs(float(obs["angle_difference"][0]))
         jackknife = float(obs["jackknife_angle"][0])
+        phi = float(obs["phi"][0])
 
         # Calculate deltas (improvement)
         distance_delta = self.prev_distance - distance
@@ -519,14 +514,17 @@ class ParkingLotEnv(gym.Env):
         # === 1. Delta-Based Rewards (improvement) ===
         angle_delta *= 4e4
         distance_delta *= 4e5
-        angle_improvement = max(0.15 * angle_delta, 0.1 * angle_delta)
-        distance_improvement = max(0.1 * distance_delta, 0.3 * distance_delta)
+        angle_improvement = max(0.2 * angle_delta, 0.4 * angle_delta)
+        angle_improvement = clamp(angle_improvement, -0.1, 0.1)
+
+        distance_improvement = max(0.2 * distance_delta, 0.4 * distance_delta)
+        distance_improvement = clamp(distance_improvement, -0.1, 0.1)
         
-        # === 2. State-Based Rewards (being in good position) ===
-        proximity_reward = 1.5 * (-0.6 * distance + 0.4)
+        # Proximity reward
+        proximity_reward = 1.2 * (-1.3 * distance + 0.4)
         
-        # Reward for good alignment (but clip to prevent negative penalties from dominating)
-        alignment_reward = 0.3 * np.cos(0.8 * np.deg2rad(angle_diff))
+        # Reward for alignment
+        alignment_reward = 0.23 * np.cos(2 * math.pi * angle_diff - math.pi) + 0.08
         
         # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
@@ -539,8 +537,8 @@ class ParkingLotEnv(gym.Env):
 
         # === Combined Reward ===
         total_reward = (
-            angle_improvement +
-            distance_improvement +
+            # angle_improvement +
+            # distance_improvement +
             proximity_reward +
             alignment_reward +
             stage_bonus -

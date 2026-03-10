@@ -10,6 +10,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from metrics_callback import CustomMetricsCallback
 import os
 import json
+import torch
+import torch.nn as nn
 
 # # --- Configuration ---
 LOG_DIR = "logs/"
@@ -146,6 +148,11 @@ def main():
         net_arch=dict(
             pi=[256, 128, 64],      # Actor: 3 hidden layers (from second image)
             qf=[256, 256]           # Critic: 2 hidden layers (from first image - Hidden Layer 1 & 2)
+        ),
+        optimizer_class=torch.optim.Adam,  # Use Adam optimizer
+        optimizer_kwargs=dict(
+            eps=1e-8,  # Adam epsilon for numerical stability
+            betas=(0.9, 0.999)  # Adam beta parameters
         )
     )
 
@@ -188,6 +195,8 @@ def main():
         model.critic.optimizer.param_groups[0]['lr'] = CRITIC_LR
         
         print("--- DDPG Model Initialized ---")
+        print(f"    Optimizer: Adam")
+        print(f"    Loss Function: MSE (Mean Squared Error)")
         print(f"    Actor Learning Rate: {ACTOR_LR}")
         print(f"    Critic Learning Rate: {CRITIC_LR}")
     

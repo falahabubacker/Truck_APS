@@ -96,7 +96,7 @@ class CustomMetricsCallback(BaseCallback):
                 time_pen_total = self.episode_reward_components.get("time_penalty", 0.0)
                 total_reward = self.episode_reward_components.get("total_reward", 0.0)
 
-                # self.logger.record('reward/total', total_reward)
+                self.logger.record('reward/total', total_reward)
                 self.logger.record('reward/avg_step', total_reward / ep_steps)
                 # self.logger.record('reward/angle_delta_total', ang_imp_total)
                 self.logger.record('reward/angle_delta_step', ang_imp_total / ep_steps)
