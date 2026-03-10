@@ -147,6 +147,8 @@ class ParkingLotEnv(gym.Env):
         self.prev_angle_difference = None
         self.prev_jackknife_angle = None
 
+        self.init_distance = None
+
     def reset(self, seed=None, options=None):
 
         super().reset(seed=None)
@@ -201,6 +203,8 @@ class ParkingLotEnv(gym.Env):
         self.prev_distance = float(obs["distance_to_target"][0])
         self.prev_angle_difference = abs(float(obs["angle_difference"][0]))
         self.prev_jackknife_angle = float(obs["jackknife_angle"][0])
+
+        self.init_distance = float(obs["distance_to_target"][0])
         
         return obs, {}
     
@@ -309,7 +313,7 @@ class ParkingLotEnv(gym.Env):
         # 4. Phi: Angle from reference point to target (relative to actor's backward direction)
         vec_to_target = np.array([target_pose[0] - reference_point[0], target_pose[1] - reference_point[1]])
         world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
-        phi = (world_angle_to_target - trailer_yaw + 180) % 360 - 180
+        phi = (world_angle_to_target - trailer_yaw) % 360 - 180 # Measured wrt backward pointing vector of trailer
         phi = min_max(phi, -180, 180)
 
         # 5. Position and distance calculations relative to target
@@ -510,7 +514,7 @@ class ParkingLotEnv(gym.Env):
         distance_improvement = clamp(distance_improvement, -0.1, 0.1)
         
         # Proximity reward
-        proximity_reward = 1.2 * (-1.3 * distance + 0.4)
+        proximity_reward = 1.2 * (-(0.4 / self.init_distance) * distance + 0.4)
         
         # Reward for alignment
         alignment_reward = 0.23 * np.cos(2 * math.pi * angle_diff - math.pi) + 0.08
@@ -552,7 +556,7 @@ class ParkingLotEnv(gym.Env):
         }
         
         return total_reward, info
-    
+
     def destroy_actors(self):
         """Helper function to destroy all spawned actors."""
         print(f"Destroying {len(self.actor_list)} actors...")
