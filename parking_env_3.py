@@ -2,14 +2,16 @@ import numpy as np
 import gymnasium as gym
 import carla
 import queue
+from collections import deque
 import time
+import math
 
-NUM_RADARS = 10              # 3 on truck, 7 on trailer
-RADAR_RANGE = 4          # Max range of radars in meters
-MAX_POINTS_PER_SENSOR = 1
+NUM_RADARS = 20              # 7 on truck, 13 on trailer
+SENSOR_RANGE = 4          # Max range of obstacle sensors in meters
+MAX_POINTS_PER_SENSOR = 1  # Max detections to store per sensor
 
 def get_actor_pose(actor):
-    # Gets an actor's [x, y, yaw] pose as a numpy array
+    """Gets an actor's [x, y, yaw] pose as a numpy array."""
     if not actor:
         return np.array([0.0, 0.0, 0.0], dtype=np.float32)
     try:
@@ -34,6 +36,12 @@ def find_obj(world, keyword, offset=0):
 
     return objs
 
+def min_max(value, o_min, o_max, n_min=0, n_max=1):
+    return (((value - o_min) / (o_max - o_min)) * (n_max - n_min)) + n_min
+
+def clamp(value, minimum, maximum):
+    return max(minimum, min(value, maximum))
+
 class ParkingLotEnv(gym.Env):
 
     def __init__(self):
@@ -47,7 +55,7 @@ class ParkingLotEnv(gym.Env):
         self.truck_bp = self.blueprint_library.find("vehicle.daf.dafxf")
         self.trailer_bp = self.blueprint_library.find("vehicle.trailer.trailer")
         self.collision_bp = self.blueprint_library.find("sensor.other.collision")
-        self.radar_bp = self.blueprint_library.find("sensor.other.radar")
+        self.obstacle_bp = self.blueprint_library.find("sensor.other.obstacle")
         # endregion
         
         # region Getting truck, trailer and parking coordinates/spawn points
@@ -70,28 +78,28 @@ class ParkingLotEnv(gym.Env):
                 
                 # Engineered Features for Better RL Performance
                 # Distance from trailer to parking spot (meters)
-                "distance_to_target": gym.spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
+                "distance_to_target": gym.spaces.Box(low=0.01, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Angular difference between trailer and target orientation (degrees, -180 to 180)
-                "angle_difference": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "angle_difference": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Jackknife angle between truck and trailer (degrees, -180 to 180)
-                "jackknife_angle": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "jackknife_angle": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Angle from trailer back end to parking spot (degrees, -180 to 180)
-                "phi": gym.spaces.Box(low=-180.0, high=180.0, shape=(1,), dtype=np.float32),
+                "phi": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Lateral distance perpendicular to parking spot orientation (meters)
-                "parallel_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                "parallel_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Longitudinal distance along parking spot forward direction (meters)
-                "longitudinal_distance": gym.spaces.Box(low=-50.0, high=50.0, shape=(1,), dtype=np.float32),
+                "longitudinal_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
-                # Radar data: [NUM_RADARS, MAX_POINTS_PER_SENSOR]
-                # Each value is the 'depth' (distance) of a detection
+                # Obstacle data: [NUM_RADARS, MAX_POINTS_PER_SENSOR]
+                # Each value is the closest detected distance
                 "radar_data": gym.spaces.Box(
                     low=0, 
-                    high=RADAR_RANGE, 
+                    high=1.0, 
                     shape=(NUM_RADARS, 1), 
                     dtype=np.float32
                 )
@@ -122,16 +130,17 @@ class ParkingLotEnv(gym.Env):
         self.max_distance = 30.0  # Maximum distance threshold (meters)
         
         # Sensor data handling
-        self.radar_queues = [queue.Queue() for _ in range(NUM_RADARS)]
+        self.obstacle_queues = [queue.Queue() for _ in range(NUM_RADARS)]
         self.collision_truck_history = []
         self.collision_trailer_history = []
         
-        # Configure the radar blueprint
-        self.radar_bp.set_attribute('horizontal_fov', '60')
-        self.radar_bp.set_attribute('vertical_fov', '15')
-        self.radar_bp.set_attribute('range', f'{RADAR_RANGE}')
+        # Configure the obstacle blueprint
+        self.obstacle_bp.set_attribute('distance', f'{SENSOR_RANGE}')
+        self.obstacle_bp.set_attribute('hit_radius', '0.5')
+        self.obstacle_bp.set_attribute('only_dynamics', 'false')
+        self.obstacle_bp.set_attribute('debug_linetrace', 'false')
 
-        self.radar_data = None
+        self.obstacle_data = None
         # endregion
 
         self.prev_distance = None
@@ -149,7 +158,7 @@ class ParkingLotEnv(gym.Env):
         self.destroy_actors()
         self.collision_truck_history.clear()
         self.collision_trailer_history.clear()
-        for q in self.radar_queues:
+        for q in self.obstacle_queues:
             while not q.empty():
                 q.get()
         
@@ -183,12 +192,6 @@ class ParkingLotEnv(gym.Env):
         # Spawn and Attach Sensors
         self.spawn_sensors()
         
-        # Wait for the first radar data to arrive from all sensors
-        for i, q in enumerate(self.radar_queues):
-            while q.empty():
-                print(f"Waiting for radar sensor {i}...")
-                time.sleep(0.01)
-        
         # endregion
         
         self.strt = time.perf_counter()
@@ -221,36 +224,47 @@ class ParkingLotEnv(gym.Env):
         # Define Sensor Mount Points
         # (x, y, z, yaw) relative to the vehicle
         self.truck_radar_mounts = [
-            (truck_bb.extent.x - 0.75, 0.0, 0.5, 0.0),   # Front
-            (0.0, truck_bb.extent.y - 0.34, 0.5, 90.0),   # Right
-            (0.0, -truck_bb.extent.y + 0.34, 0.5, -90.0)  # Left
+            (truck_bb.extent.x - 0.45, 0.0, 1, 0.0),   # Front
+            (0.0, truck_bb.extent.y - 0.04, 1, 90.0),   # Right
+            (truck_bb.extent.x - 0.45, -truck_bb.extent.y + 0.04, 1, -45.0),  # Corner
+            (truck_bb.extent.x - 0.45, truck_bb.extent.y - 0.04, 1, 45.0),   # Corner
+            (0.0, -truck_bb.extent.y + 0.04, 1, -90.0),  # Left
+            (-truck_bb.extent.x * 0.4, truck_bb.extent.y - 0.04, 1, 90.0),   # Mid-Right
+            (-truck_bb.extent.x * 0.4, -truck_bb.extent.y + 0.04, 1, -90.0)  # Mid-Left
         ]
         self.trailer_radar_mounts = [
-            (-trailer_bb.extent.x * 2.1, 0.0, 0.5, 180.0), # Back Center
-            (-trailer_bb.extent.x * 0.7, trailer_bb.extent.y + 0.2, 0.5, 90.0),   # Right Front
-            (-trailer_bb.extent.x * 0.7, -trailer_bb.extent.y - 0.2, 0.5, -90.0),  # Left Front
-            (-trailer_bb.extent.x * 1.8, trailer_bb.extent.y + 0.2, 0.5, 90.0),   # Right Back
-            (-trailer_bb.extent.x * 1.8, -trailer_bb.extent.y - 0.2, 0.5, -90.0), # Left Back
-            (-trailer_bb.extent.x * 2.1, trailer_bb.extent.y + 0.0, 0.5, 180.0),  # Right Back Corner
-            (-trailer_bb.extent.x * 2.1, -trailer_bb.extent.y - 0.0, 0.5, 180.0)  # Left Back Corner
+            # Right side (4 sensors)
+            (-trailer_bb.extent.x * 0.3, trailer_bb.extent.y + 0.5, 1, 90.0),
+            (-trailer_bb.extent.x * 0.9, trailer_bb.extent.y + 0.5, 1, 90.0),
+            (-trailer_bb.extent.x * 1.5, trailer_bb.extent.y + 0.5, 1, 90.0),
+            (-trailer_bb.extent.x * 2.1, trailer_bb.extent.y + 0.5, 1, 90.0),
+            # Left side (4 sensors)
+            (-trailer_bb.extent.x * 0.3, -trailer_bb.extent.y - 0.5, 1, -90.0),
+            (-trailer_bb.extent.x * 0.9, -trailer_bb.extent.y - 0.5, 1, -90.0),
+            (-trailer_bb.extent.x * 1.5, -trailer_bb.extent.y - 0.5, 1, -90.0),
+            (-trailer_bb.extent.x * 2.1, -trailer_bb.extent.y - 0.5, 1, -90.0),
+            # Back (4 sensors)
+            (-trailer_bb.extent.x * 2.1, 0, 1, 180.0),
+            (-trailer_bb.extent.x * 2.1, trailer_bb.extent.y * 0.5 + 0.5, 1, 180.0),
+            (-trailer_bb.extent.x * 2.1, -trailer_bb.extent.y * 0.5 - 0.5, 1, 180.0),
+            (-trailer_bb.extent.x * 2.1, trailer_bb.extent.y * 0.5 + 0.5, 1, 135.0),
+            (-trailer_bb.extent.x * 2.1, -trailer_bb.extent.y * 0.5 - 0.5, 1, -135.0),
         ]
 
-        # Radar Sensors
-        # 3 on the truck
+        # Obstacle Sensors
+        # 7 on the truck
         for i, (x, y, z, yaw) in enumerate(self.truck_radar_mounts):
             tf = carla.Transform(carla.Location(x=x, y=y, z=z), carla.Rotation(yaw=yaw))
-            sensor = self.world.spawn_actor(self.radar_bp, tf, attach_to=self.truck)
-            # sensor.listen(self.radar_queues[i].put)
-            sensor.listen(lambda radar_data, queue_id=i: self.radar_callback(radar_data, queue_id))
+            sensor = self.world.spawn_actor(self.obstacle_bp, tf, attach_to=self.truck)
+            sensor.listen(lambda obstacle_event, queue_id=i: self.obstacle_callback(obstacle_event, queue_id))
             self.actor_list.append(sensor)
             
-        # 7 on the trailer
+        # 13 on the trailer
         for i, (x, y, z, yaw) in enumerate(self.trailer_radar_mounts):
-            j = i + 3 # Offset index for queues and list
+            j = i + len(self.truck_radar_mounts)  # Offset index for queues and list
             tf = carla.Transform(carla.Location(x=x, y=y, z=z), carla.Rotation(yaw=yaw))
-            sensor = self.world.spawn_actor(self.radar_bp, tf, attach_to=self.trailer)
-            # sensor.listen(self.radar_queues[j].put)
-            sensor.listen(lambda radar_data, queue_id=j: self.radar_callback(radar_data, queue_id))
+            sensor = self.world.spawn_actor(self.obstacle_bp, tf, attach_to=self.trailer)
+            sensor.listen(lambda obstacle_event, queue_id=j: self.obstacle_callback(obstacle_event, queue_id))
             self.actor_list.append(sensor)
             
         print(f"Spawned {len(self.actor_list)} actors (vehicles + sensors).")
@@ -263,7 +277,6 @@ class ParkingLotEnv(gym.Env):
         parking_pose = get_actor_pose(self.parking_point)
         truck_parking_pose = get_actor_pose(self.truck_parking_point)
         
-        actor_pose = trailer_pose  # For engineered features, we consider the trailer as the main actor
         # Determine current target based on stage
         if self.current_stage == 0:
             # Stage 1: Target is truck_parking_point, measure from truck
@@ -276,7 +289,6 @@ class ParkingLotEnv(gym.Env):
         trailer_x, trailer_y, trailer_yaw = trailer_pose
         truck_x, truck_y, truck_yaw = truck_pose
         target_x, target_y, target_yaw = target_pose
-        actor_x, actor_y, actor_yaw = actor_pose
         
         trailer_yaw_rad = np.deg2rad(trailer_yaw)
         trailer_backward = np.array([-np.cos(trailer_yaw_rad), -np.sin(trailer_yaw_rad)])
@@ -285,66 +297,50 @@ class ParkingLotEnv(gym.Env):
         
         # 1. Distance to target
         distance_to_target = np.linalg.norm(reference_point - target_pose[:2])
+        distance_to_target = min_max(distance_to_target, 0, 40)
         
-        # 2. Angle difference (actor orientation vs target orientation)
-        # IMPORTANT: Use the correct vehicle's orientation for the current stage
-        if self.current_stage == 0:
-            # Stage 0: truck should align with truck_parking
-            actor_yaw_for_angle = truck_yaw
-        else:
-            # Stage 1: trailer should align with trailer_parking
-            actor_yaw_for_angle = trailer_yaw
-        
-        angle_diff = (actor_yaw_for_angle - target_yaw + 180) % 360 - 180
+        angle_diff = (trailer_yaw - target_yaw + 180) % 360 - 180
+        angle_diff = min_max(angle_diff, -180, 180)
         
         # 3. Jackknife angle (truck orientation vs trailer orientation)
         jackknife = (truck_yaw - trailer_yaw + 180) % 360 - 180
-        
+        jackknife = min_max(jackknife, -180, 180)
+
         # 4. Phi: Angle from reference point to target (relative to actor's backward direction)
         vec_to_target = np.array([target_pose[0] - reference_point[0], target_pose[1] - reference_point[1]])
         world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
-        phi = (world_angle_to_target - actor_yaw + 180) % 360 - 180
-        
+        phi = (world_angle_to_target - trailer_yaw + 180) % 360 - 180
+        phi = min_max(phi, -180, 180)
+
         # 5. Position and distance calculations relative to target
         target_yaw_rad = np.deg2rad(target_yaw)
         target_forward = np.array([np.cos(target_yaw_rad), np.sin(target_yaw_rad)])
         
         # Vector from target to actor
-        to_actor = np.array([actor_x - target_x, actor_y - target_y])
+        to_actor = np.array([trailer_x - target_x, trailer_y - target_y])
         
         # Longitudinal distance (along target's forward direction)
         longitudinal_dist = np.dot(to_actor, target_forward)
+        longitudinal_dist = min_max(longitudinal_dist, 0, 40)
         
         # Parallel distance (perpendicular to target's forward direction)
         target_right = np.array([-target_forward[1], target_forward[0]])
         parallel_dist = np.dot(to_actor, target_right)
-        
-        # Process Radar Data
-        # Initialize radar data array, padding with max range
-        radar_obs = np.full((NUM_RADARS, MAX_POINTS_PER_SENSOR), RADAR_RANGE, dtype=np.float32)
+        parallel_dist = min_max(parallel_dist, 0, 40)
+
+        # Process obstacle data
+        obstacle_obs = np.full((NUM_RADARS, MAX_POINTS_PER_SENSOR), SENSOR_RANGE, dtype=np.float32)
         
         for i in range(NUM_RADARS):
-            # Get the latest data packet from this sensor's queue
-
-            while not self.radar_queues[i].empty():
+            latest_distance = SENSOR_RANGE
+            while not self.obstacle_queues[i].empty():
                 try:
-                    self.radar_data = self.radar_queues[i].get_nowait()
+                    latest_distance = self.obstacle_queues[i].get_nowait()
                 except queue.Empty:
                     break
-            
-            # Get 'depth' (distance) for each detection
-            detections = np.array([d.depth for d in self.radar_data])
-            
-            # Clamp detections to max range
-            detections[detections > RADAR_RANGE] = RADAR_RANGE
-            
-            # Sort by distance (closest first)
-            detections = np.sort(detections)
-            
-            # Fill the observation array with the closest detections
-            num_detections = min(len(detections), MAX_POINTS_PER_SENSOR)
-            if num_detections > 0:
-                radar_obs[i, 0] = detections[0]
+
+            latest_distance = clamp(float(latest_distance), 0.0, SENSOR_RANGE)
+            obstacle_obs[i, 0] = min_max(latest_distance, SENSOR_RANGE, 0.0)
 
         return {
             "current_stage": self.current_stage,
@@ -354,7 +350,7 @@ class ParkingLotEnv(gym.Env):
             "phi": np.array([phi], dtype=np.float32),
             "parallel_distance": np.array([parallel_dist], dtype=np.float32),
             "longitudinal_distance": np.array([longitudinal_dist], dtype=np.float32),
-            "radar_data": radar_obs
+            "radar_data": obstacle_obs
         }
     
     def step(self, action):
@@ -425,13 +421,13 @@ class ParkingLotEnv(gym.Env):
         # Check for Crash (Terminated)
         if len(self.collision_truck_history) > 0 or len(self.collision_trailer_history) > 0:
             terminated = True
-            reward = -10.0  # Collision penalty
+            reward = -1.0  # Collision penalty
             print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
         
         # Check how long the simulation has been running
         if time.perf_counter() - self.strt > 150:
             terminated = True
-            reward = -10.0  # Timeout penalty
+            reward = -1.0  # Timeout penalty
             print("Simulation run for too long!")
 
         # Check for success (only in Stage 2)
@@ -447,10 +443,10 @@ class ParkingLotEnv(gym.Env):
             # If we are within 1 meter and 10 degrees, we win!
             if dist_to_target < 1.0 and abs(yaw_diff) < 10.0:
                 terminated = True
-                reward = 10.0  # Big positive reward for success!
+                reward = 1.0  # Big positive reward for success!
                 print("\n=== PARKING COMPLETE! ===\n")
         
-        # Display metrics as HUD (fixed position relative to spectator camera)
+        # region Display metrics as HUD (fixed position relative to spectator camera)
         spectator = self.world.get_spectator()
         spectator_transform = spectator.get_transform()
         
@@ -468,8 +464,14 @@ class ParkingLotEnv(gym.Env):
         angle_diff_val = float(obs["angle_difference"][0])
         stage_name = "Stage 1: Positioning" if self.current_stage == 0 else "Stage 2: Backing"
         
-        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.1f}°\n\
-        Phi: {phi:.1f}°\nJackknife: {jackknife:.1f}°\nReward: {reward:.3f}."
+        rew_comp = info["reward_comp"]
+        text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.2f}°\n\
+        Phi: {phi:.2f}°\nJackknife: {jackknife:.2f}°\nReward: {reward:.3f}.\n\
+        Angle_Rew: {rew_comp['alignment_reward']:.3f}\n\
+        Angle_Imp_Rew: {rew_comp['angle_improvement']:.3f}\n\
+        Dist_Rew: {rew_comp['proximity_reward']:.3f}\n\
+        Dist_Imp_Rew: {rew_comp['distance_improvement']:.3f}\n\
+        Jackknife_Pen: {rew_comp['jackknife_penalty']:.3f}"
         self.world.debug.draw_string(
             hud_location,
             text,
@@ -477,83 +479,67 @@ class ParkingLotEnv(gym.Env):
             color=carla.Color(r=0, g=50, b=0) if self.current_stage == 0 else carla.Color(r=255, g=165, b=0),
             life_time=0.05,
         )
+        # endregion
         
         return obs, reward, terminated, truncated, info
     
     def _calculate_jackknife_penalty(self, jackknife_angle):
-        abs_jackknife = abs(jackknife_angle)
-        
-        # Soft start: no penalty for small angles
-        if abs_jackknife < 20:
-            return 0.0
-        
-        # Progressive penalty for moderate jackknife (20-60°)
-        if abs_jackknife < 60:
-            # Linear growth: starts at 0 at 20°, reaches ~0.2 at 60°
-            penalty = (abs_jackknife - 20) * 0.005
-            return penalty
-        
-        # Heavy penalty for severe jackknife (>60°)
-        # Exponential growth: 0.2 at 60°, 0.5 at 70°, 1.0 at 80°+
-        penalty = 0.2 + (abs_jackknife - 60) * 0.04
-        
-        return min(penalty, 1.0)  # Cap at 1.0 to prevent explosions
+        if jackknife_angle > 0.73 or jackknife_angle < 0.26:
+            return -0.65 * np.cos(7.075 * jackknife_angle - 3.537)
+        else:
+            return 0
 
     def _calculate_reward(self, obs):
-        # Extract current state scalars
+
         distance = float(obs["distance_to_target"][0])
         angle_diff = abs(float(obs["angle_difference"][0]))
         jackknife = float(obs["jackknife_angle"][0])
+        phi = float(obs["phi"][0])
 
         # Calculate deltas (improvement)
         distance_delta = self.prev_distance - distance
         angle_delta = abs(self.prev_angle_difference) - abs(angle_diff)
         
         # === 1. Delta-Based Rewards (improvement) ===
-        # Reward improvement, but don't over-penalize necessary detours
-        angle_improvement = 20 * angle_delta  # Reduced from 35
-        distance_improvement = 30 * distance_delta  # Reduced from 65
+        angle_delta *= 4e4
+        distance_delta *= 4e5
+        angle_improvement = max(0.2 * angle_delta, 0.4 * angle_delta)
+        angle_improvement = clamp(angle_improvement, -0.1, 0.1)
+
+        distance_improvement = max(0.2 * distance_delta, 0.4 * distance_delta)
+        distance_improvement = clamp(distance_improvement, -0.1, 0.1)
         
-        # Symmetric scaling (removed 1.5x penalty bias)
-        # Small asymmetry is OK, but 1.5x was too harsh
-        angle_improvement *= 1.2 if angle_improvement < 0 else 1.0
-        distance_improvement *= 1.2 if distance_improvement < 0 else 1.0
+        # Proximity reward
+        proximity_reward = 1.2 * (-1.3 * distance + 0.4)
         
-        # === 2. State-Based Rewards (being in good position) ===
-        # Reward for being close to target (exponential decay)
-        # At distance=1m: +1.0, at distance=5m: +0.2, at distance=10m: +0.05
-        proximity_reward = np.exp(-distance / 5.0) * 5.0
-        
-        # Reward for good alignment (but clip to prevent negative penalties from dominating)
-        # At 0°: +1.0, at 45°: +0.5, at 90°: 0.0, at 180°: -0.3 (clipped to prevent collapse)
-        alignment_raw = np.cos(np.deg2rad(angle_diff))
-        alignment_reward = np.clip(alignment_raw, -0.3, 1.0) * 3.0  # Clamp negative to -0.3 max
+        # Reward for alignment
+        alignment_reward = 0.23 * np.cos(2 * math.pi * angle_diff - math.pi) + 0.08
         
         # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
 
         # === 4. Stage Completion Bonus ===
         stage_bonus = 0.0
-        if self.current_stage == 1 and not self._stage_1_bonus_given:
-            stage_bonus = 100  # Increased for better signal
-            self._stage_1_bonus_given = True
         
         # === 5. Small time penalty to encourage efficiency ===
         time_penalty = 0.01
 
         # === Combined Reward ===
-        # Balance improvement (delta) with baseline state rewards
         total_reward = (
-            angle_improvement +           # Reward for improving angle
-            distance_improvement +        # Reward for getting closer
-            proximity_reward +     # Reward for being close (baseline)
-            alignment_reward +     # Reward for being aligned (baseline)
-            stage_bonus -                # Big bonus for stage completion
-            jackknife_penalty -          # Penalty for jackknifing
-            time_penalty                 # Small efficiency penalty
+            # angle_improvement +
+            # distance_improvement +
+            proximity_reward +
+            alignment_reward +
+            stage_bonus -
+            jackknife_penalty -
+            time_penalty
         )
 
         info = {}
+        info["other"] = {
+            "angle_delta": angle_delta,
+            "distance_delta": distance_delta,
+        }
         info["reward_comp"] = {
             "total_reward": total_reward,
             "angle_improvement": angle_improvement,
@@ -586,10 +572,10 @@ class ParkingLotEnv(gym.Env):
         # --- FIX 2: Add a small delay to prevent sensor warnings ---
         time.sleep(2.0)
     
-    def radar_callback(self, radar_data, queue_id):
+    def obstacle_callback(self, obstacle_event, queue_id):
 
         try:
-            self.radar_queues[queue_id].put(radar_data)
+            self.obstacle_queues[queue_id].put(obstacle_event.distance)
             # region draw arrow and radar signal
             # current_rot = radar_data.transform.rotation
             # for detect in radar_data:
@@ -625,7 +611,7 @@ class ParkingLotEnv(gym.Env):
             # endregion
 
         except Exception as e:
-            print(f"Error in radar callback: {e}")
+            print(f"Error in obstacle callback: {e}")
 
     def set_episode_offset(self, offset):
         """Set the episode number offset when resuming from checkpoint."""

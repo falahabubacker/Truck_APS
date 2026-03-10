@@ -90,16 +90,6 @@ def main():
         return env
 
     env = DummyVecEnv([make_env])
-
-    # Normalize observations and reward
-    # env = VecNormalize(
-    #     env,
-    #     norm_obs=True,         # Normalize observations to ~N(0,1)
-    #     norm_reward=False,      # Normalize rewards (scaled 5x in env)
-    #     clip_obs=10.0,         # Clip normalized obs to [-1.0, 1.0]
-    #     # clip_reward=10.0,      # Clip normalized rewards to [-1.0, 1.0]
-    #     gamma=GAMMA
-    # )
     
     # Load episode state if resuming from checkpoint (before normalization wrapper)
     episode_state = load_episode_state(EPISODE_STATE_FILE)
