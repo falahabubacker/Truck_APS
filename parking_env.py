@@ -633,12 +633,56 @@ class ParkingLotEnv(gym.Env):
     def destroy_actors(self):
         """Helper function to destroy all spawned actors."""
         print(f"Destroying {len(self.actor_list)} actors...")
+        if not self.actor_list:
+            return
+
+        alive_actors = []
+        sensor_actors = []
+
+        # Build a stable list first so we can teardown sensors before destruction.
         for actor in self.actor_list:
-            if actor and actor.is_alive:
-                # Sensors must be stopped before destroying
-                if 'sensor' in actor.type_id:
-                    actor.stop()
-                actor.destroy()
+            if actor is None:
+                continue
+            try:
+                if not actor.is_alive:
+                    continue
+                alive_actors.append(actor)
+                if "sensor" in actor.type_id:
+                    sensor_actors.append(actor)
+            except RuntimeError:
+                # Actor may already be gone on server side.
+                continue
+
+        # Stop sensor streams before sending destroy commands.
+        for sensor in sensor_actors:
+            try:
+                sensor.stop()
+            except RuntimeError:
+                pass
+
+        # Let the server process stop requests before destruction.
+        if sensor_actors:
+            try:
+                self.world.tick()
+            except RuntimeError:
+                pass
+
+        # Batch destroy is less prone to hanging than per-actor RPC destroy calls.
+        if alive_actors:
+            try:
+                destroy_cmds = [carla.command.DestroyActor(actor.id) for actor in alive_actors]
+                responses = self.client.apply_batch_sync(destroy_cmds, True)
+
+                for actor, response in zip(alive_actors, responses):
+                    if response.error:
+                        print(f"DestroyActor failed for id={actor.id} type={actor.type_id}: {response.error}")
+            except RuntimeError as e:
+                print(f"Batch sync destroy failed, trying non-blocking batch destroy: {e}")
+                try:
+                    self.client.apply_batch([carla.command.DestroyActor(actor.id) for actor in alive_actors])
+                except RuntimeError as async_error:
+                    print(f"Non-blocking batch destroy also failed: {async_error}")
+
         self.actor_list.clear()
     
     def close(self):
