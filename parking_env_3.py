@@ -5,6 +5,7 @@ import queue
 from collections import deque
 import time
 import math
+import subprocess
 
 NUM_RADARS = 20              # 7 on truck, 13 on trailer
 SENSOR_RANGE = 4          # Max range of obstacle sensors in meters
@@ -41,6 +42,9 @@ def min_max(value, o_min, o_max, n_min=0, n_max=1):
 
 def clamp(value, minimum, maximum):
     return max(minimum, min(value, maximum))
+
+def kill_carla():
+    subprocess.run(['pkill', '-9', '-f', 'CarlaUE4'], check=False)
 
 class ParkingLotEnv(gym.Env):
 
@@ -609,6 +613,7 @@ class ParkingLotEnv(gym.Env):
                     self.client.apply_batch([carla.command.DestroyActor(actor.id) for actor in alive_actors])
                 except RuntimeError as async_error:
                     print(f"Non-blocking batch destroy also failed: {async_error}")
+                    kill_carla()
 
         self.actor_list.clear()
     
