@@ -20,8 +20,8 @@ if pgrep -f "CarlaUE4" >/dev/null 2>&1; then
 	echo "CARLA already running."
 else
 	echo "Starting CARLA..."
-	# -RenderOffScreen -quality-level=Low
-	"$CARLA_BIN" -RenderOffScreen >"$CARLA_LOG" 2>&1 &
+	# -RenderOffScreen -quality-level=Medium
+	"$CARLA_BIN" -quality-level=Medium >"$CARLA_LOG" 2>&1 &
 
 	# Background watchdog: truncate log in-place if it exceeds the cap.
 	# truncate -s 0 is safe even while CARLA holds the fd open.

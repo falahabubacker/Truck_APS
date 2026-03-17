@@ -548,7 +548,7 @@ class ParkingLotEnv(gym.Env):
         stage_bonus = 0.0
         
         # === 5. Small time penalty to encourage efficiency ===
-        time_penalty = 0.1
+        time_penalty = 0.06
 
         # === Combined Reward ===
         total_reward = (
