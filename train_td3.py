@@ -2,7 +2,7 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env_3 import ParkingLotEnv
+from parking_env import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
@@ -12,11 +12,17 @@ import os
 import json
 import torch
 import torch.nn as nn
+import subprocess
+from pushbullet import PushBullet
+
+access_token = "o.XKOXgtE25l2cfwDRyCOGqFlocuigMTph"
+pb = PushBullet(access_token)
 
 # # --- Configuration ---
 LOG_DIR = "logs/"
 MODEL_SAVE_PATH = "models/td3_parking/"
 EPISODE_STATE_FILE = os.path.join(MODEL_SAVE_PATH, "episode_state.json")
+REPLAY_BUFFER_FILE = os.path.join(MODEL_SAVE_PATH, "td3_replay_buffer.pkl")
 TOTAL_TIMESTEPS = 1000000  # Increased for complex parking task
 LEARNING_STARTS = 20000  # More random exploration to fill buffer
 BUFFER_SIZE = 100000  # Replay buffer size from Table 6
@@ -71,11 +77,11 @@ class EpisodeStateCheckpointCallback(CheckpointCallback):
     
     def _on_step(self) -> bool:
         """Save model and episode state at checkpoint intervals."""
-        should_save = super()._on_step()
-        if should_save and self.num_timesteps > 0:
-            # Save episode state whenever a checkpoint is saved
+        continue_training = super()._on_step()
+        # CheckpointCallback saves when n_calls is a multiple of save_freq.
+        if self.n_calls % self.save_freq == 0 and self.num_timesteps > 0:
             save_episode_state(self.model.env, self.episode_state_file)
-        return should_save
+        return continue_training
 
 def main():
     """
@@ -96,17 +102,6 @@ def main():
     if episode_state:
         env.envs[0].unwrapped.restore_episode_state(episode_state)
     
-    # Add observation normalization (critical for TD3 with mixed-scale features)
-    # Radar data (0-100), distances (0-50), angles (0-180) need normalization
-    env = VecNormalize(
-        env,
-        norm_obs=True,         # Normalize observations to ~N(0,1)
-        norm_reward=True,      # Normalize rewards (scaled 5x in env)
-        clip_obs=10,         # Clip normalized obs to [-10, 10]
-        clip_reward=10,      # Clip normalized rewards to [-10, 10]
-        gamma=GAMMA
-    )
-    
     print("--- Environment Created and Wrapped ---")
     print(f"Observation Space (Flattened): {env.observation_space}")
     print(f"Action Space: {env.action_space}")
@@ -118,7 +113,8 @@ def main():
         episode_state_file=EPISODE_STATE_FILE,
         save_freq=SAVE_FREQ,
         save_path=MODEL_SAVE_PATH,
-        name_prefix="td3_model"
+        name_prefix="td3_model",
+        save_replay_buffer=True
     )
     
     # Custom metrics callback for TensorBoard
@@ -175,6 +171,16 @@ def main():
         )
         # Restore action noise (not serializable)
         model.action_noise = action_noise
+
+        if os.path.exists(REPLAY_BUFFER_FILE):
+            try:
+                model.load_replay_buffer(REPLAY_BUFFER_FILE)
+                print(f"--- Replay buffer loaded from {REPLAY_BUFFER_FILE} ---")
+            except Exception as e:
+                print(f"Warning: Could not load replay buffer: {e}")
+        else:
+            print("--- No replay buffer file found, continuing with empty buffer ---")
+
         resume_training = True
         print("--- Model loaded, resuming training ---")
     else:
@@ -218,10 +224,16 @@ def main():
         )
     except Exception as e:
         print(f"An error occurred during training: {e}")
+        subprocess.run(['pkill', '-9', '-f', 'CarlaUE4'], check=False)
     finally:
         # 5. Clean up and save
         print("--- Training Finished ---")
         model.save(os.path.join(MODEL_SAVE_PATH, "td3_parking_final"))
+        try:
+            model.save_replay_buffer(REPLAY_BUFFER_FILE)
+            print(f"Replay buffer saved to {REPLAY_BUFFER_FILE}")
+        except Exception as e:
+            print(f"Warning: Could not save replay buffer: {e}")
         # Save episode state for future resuming
         save_episode_state(env, EPISODE_STATE_FILE)
         # Save normalization statistics only when VecNormalize is enabled
@@ -229,6 +241,7 @@ def main():
             env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
         print(f"Final model saved to {MODEL_SAVE_PATH}")
         env.close() # This will call destroy_actors()
+        push = pb.push_note("Carla", "Training has aborted!")
 
 if __name__ == '__main__':
     main()

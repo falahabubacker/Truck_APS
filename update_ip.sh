@@ -1,0 +1,1 @@
+noip-duc -g all.ddnskey.com --username ckqnhbj --password 3TqoZwXnNUCh
