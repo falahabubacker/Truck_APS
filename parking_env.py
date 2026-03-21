@@ -520,11 +520,10 @@ class ParkingLotEnv(gym.Env):
         jackknife = float(obs["jackknife_angle"][0])
         phi = float(obs["phi"][0])
 
-        # Calculate deltas (improvement)
+        # region Improvement Rewards
         distance_delta = self.prev_distance - distance
         angle_delta = abs(self.prev_angle_difference) - abs(angle_diff)
         
-        # === 1. Delta-Based Rewards (improvement) ===
         angle_delta *= 4e4
         distance_delta *= 4e5
         angle_improvement = max(0.2 * angle_delta, 0.4 * angle_delta)
@@ -532,14 +531,16 @@ class ParkingLotEnv(gym.Env):
 
         distance_improvement = max(0.2 * distance_delta, 0.4 * distance_delta)
         distance_improvement = clamp(distance_improvement, -0.1, 0.1)
+        # endregion
         
         # Proximity reward
+        # proximity_reward = 0.5 * (1 - (distance /  self.init_distance) ** 2)
         proximity_reward = 1.2 * (-(0.4 / self.init_distance) * distance + 0.4)
         
         # Reward for alignment
-        # y = (1 - distance) * np.cos(2 * math.pi - math.pi)
-        # alignment_reward = max(0, 0.4 * y) + min(0, 0.15 * y)
-        alignment_reward = 0.23 * np.cos(2 * math.pi * angle_diff - math.pi) + 0.08
+        # y_pre = (1 - distance) * np.cos(2 * math.pi * angle_diff - math.pi)
+        # alignment_reward = max(0, 0.3 * y_pre) + min(0, 0.15 * y_pre)
+        alignment_reward = 0.23 * np.cos(math.pi * (2 * angle_diff - 1)) + 0.08
         
         # === 3. Jackknife Penalty ===
         jackknife_penalty = self._calculate_jackknife_penalty(jackknife)
