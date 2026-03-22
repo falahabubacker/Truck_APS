@@ -80,24 +80,17 @@ class ParkingLotEnv(gym.Env):
                 # Current parking stage: 0 = positioning (go to truck_parking), 1 = backing (go to trailer_parking)
                 "current_stage": gym.spaces.Discrete(2),
                 
-                # Engineered Features for Better RL Performance
-                # Distance from trailer to parking spot (meters)
+                # Distance from trailer to parking spot (normalized 0-1)
                 "distance_to_target": gym.spaces.Box(low=0.01, high=1.0, shape=(1,), dtype=np.float32),
                 
-                # Angular difference between trailer and target orientation (degrees, -180 to 180)
+                # Angular difference between trailer and target orientation (normalized 0-1)
                 "angle_difference": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
-                # Jackknife angle between truck and trailer (degrees, -180 to 180)
+                # Jackknife angle between truck and trailer (normalized 0-1)
                 "jackknife_angle": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
-                # Angle from trailer back end to parking spot (degrees, -180 to 180)
+                # Angle from trailer back end to parking spot (normalized 0-1)
                 "phi": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
-                
-                # Lateral distance perpendicular to parking spot orientation (meters)
-                "parallel_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
-                
-                # Longitudinal distance along parking spot forward direction (meters)
-                "longitudinal_distance": gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
                 
                 # Obstacle data: [NUM_RADARS, MAX_POINTS_PER_SENSOR]
                 # Each value is the closest detected distance
@@ -322,23 +315,7 @@ class ParkingLotEnv(gym.Env):
         world_angle_to_target = np.rad2deg(np.arctan2(vec_to_target[1], vec_to_target[0]))
         phi = (world_angle_to_target - trailer_yaw) % 360 - 180 # Measured wrt backward pointing vector of trailer
         phi = min_max(phi, -180, 180)
-
-        # 5. Position and distance calculations relative to target
-        target_yaw_rad = np.deg2rad(target_yaw)
-        target_forward = np.array([np.cos(target_yaw_rad), np.sin(target_yaw_rad)])
-        
-        # Vector from target to actor
-        to_actor = np.array([trailer_x - target_x, trailer_y - target_y])
-        
-        # Longitudinal distance (along target's forward direction)
-        longitudinal_dist = np.dot(to_actor, target_forward)
-        longitudinal_dist = min_max(longitudinal_dist, 0, 40)
-        
-        # Parallel distance (perpendicular to target's forward direction)
-        target_right = np.array([-target_forward[1], target_forward[0]])
-        parallel_dist = np.dot(to_actor, target_right)
-        parallel_dist = min_max(parallel_dist, 0, 40)
-
+                        
         # Process obstacle data
         obstacle_obs = np.full((NUM_RADARS, MAX_POINTS_PER_SENSOR), SENSOR_RANGE, dtype=np.float32)
         
@@ -359,8 +336,6 @@ class ParkingLotEnv(gym.Env):
             "angle_difference": np.array([angle_diff], dtype=np.float32),
             "jackknife_angle": np.array([jackknife], dtype=np.float32),
             "phi": np.array([phi], dtype=np.float32),
-            "parallel_distance": np.array([parallel_dist], dtype=np.float32),
-            "longitudinal_distance": np.array([longitudinal_dist], dtype=np.float32),
             "radar_data": obstacle_obs
         }
     
@@ -416,7 +391,7 @@ class ParkingLotEnv(gym.Env):
             print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
         
         # Check how long the simulation has been running
-        if time.perf_counter() - self.strt > 150:
+        if time.perf_counter() - self.strt > 130:
             terminated = True
             reward = -1.0  # Timeout penalty
             print("Simulation run for too long!")
@@ -432,7 +407,7 @@ class ParkingLotEnv(gym.Env):
             yaw_diff = (trailer_yaw - parking_yaw + 180) % 360 - 180
             
             # If we are within 1 meter and 10 degrees, we win!
-            if dist_to_target < 1.0 and abs(yaw_diff) < 10.0:
+            if dist_to_target < 1.0 and abs(yaw_diff) < 15.0:
                 terminated = True
                 reward = 1.0  # Big positive reward for success!
                 print("\n=== PARKING COMPLETE! ===\n")
