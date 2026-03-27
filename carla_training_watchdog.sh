@@ -51,28 +51,19 @@ trap cleanup EXIT INT TERM
 
 find_carla_pids() {
     # Supports packaged CARLA (CarlaUE4) and source builds (UE4Editor with CarlaUE4 project).
-    pgrep -f "CarlaUE4.sh|CarlaUE4-Linux-Shipping|(^|/)CarlaUE4( |$)|UE4Editor.*CarlaUE4" || true
+    pgrep -x "CarlaUE4"
 }
 
 get_carla_memory_gb() {
-    local pids
-    pids="$(find_carla_pids)"
+    local pid
+    pid="$(find_carla_pids)"
 
-    if [ -z "$pids" ]; then
+    if [ -z "$pid" ]; then
         echo "0"
         return
     fi
 
-    # Sum RSS over all CARLA-related processes so monitor reflects real usage.
-    local rss_kb
-    rss_kb=$(ps -p "$pids" -o rss= 2>/dev/null | awk '{s+=$1} END {print s+0}')
-    if [ -z "$rss_kb" ] || [ "$rss_kb" = "0" ]; then
-        echo "0"
-        return
-    fi
-
-    local rss_gb=$(echo "scale=2; $rss_kb / 1024 / 1024" | bc)
-    echo "$rss_gb"
+    ps -o rss,vsz,cmd -p "$pid" 2>/dev/null | tail -n +2 | awk '{rss_gb=$1/1024/1024; vsz_gb=$2/1024/1024; print rss_gb " " vsz_gb " " $3}' || echo "0"
 }
 
 monitor_memory() {
