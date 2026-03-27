@@ -101,7 +101,7 @@ monitor_memory() {
             ps aux | grep -i unreal | grep -v grep || true
         fi
         
-        log_info "CARLA memory: ${mem_gb}GB"
+        # log_info "CARLA memory: ${mem_gb}GB"
         
         # Compare as floats using bc
         if (( $(echo "$mem_gb >= $MEMORY_THRESHOLD_GB" | bc -l) )); then
