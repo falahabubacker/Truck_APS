@@ -59,7 +59,7 @@ get_carla_memory_gb() {
     pid="$(find_carla_pids)"
 
     if [ -z "$pid" ]; then
-        echo "0"
+        echo "No PID found for CARLA process"
         return
     fi
 
