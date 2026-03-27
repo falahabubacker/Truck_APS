@@ -59,12 +59,25 @@ get_carla_memory_gb() {
     pid="$(find_carla_pids)"
 
     if [ -z "$pid" ]; then
-        echo "No PID found for CARLA process"
+        echo "0"
         return
     fi
 
-    ps -o rss,vsz,cmd -p "$pid" 2>/dev/null || echo "0"
-    # | tail -n +2 | awk '{rss_gb=$1/1024/1024; vsz_gb=$2/1024/1024; print rss_gb " " vsz_gb " " $3}' 
+    # Normalize PID list (ps -p accepts comma-separated list)
+    local pid_list
+    pid_list=$(echo "$pid" | tr '\n' ',' | sed 's/,$//')
+
+    # Sum RSS (in KB) for all CARLA PIDs and convert to GB (float with 2 decimals)
+    local rss_kb
+    rss_kb=$(ps -o rss= -p "$pid_list" 2>/dev/null | awk '{sum += $1} END {print sum+0}')
+    if [ -z "$rss_kb" ] || [ "$rss_kb" = "0" ]; then
+        echo "0"
+        return
+    fi
+
+    local rss_gb
+    rss_gb=$(echo "scale=2; $rss_kb/1024/1024" | bc -l)
+    echo "$rss_gb"
 }
 
 monitor_memory() {
