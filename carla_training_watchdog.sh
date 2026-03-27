@@ -63,7 +63,8 @@ get_carla_memory_gb() {
         return
     fi
 
-    ps -o rss,vsz,cmd -p "$pid" 2>/dev/null | tail -n +2 | awk '{rss_gb=$1/1024/1024; vsz_gb=$2/1024/1024; print rss_gb " " vsz_gb " " $3}' || echo "0"
+    ps -o rss,vsz,cmd -p "$pid" 2>/dev/null || echo "0"
+    # | tail -n +2 | awk '{rss_gb=$1/1024/1024; vsz_gb=$2/1024/1024; print rss_gb " " vsz_gb " " $3}' 
 }
 
 monitor_memory() {
