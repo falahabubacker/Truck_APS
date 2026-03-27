@@ -69,7 +69,6 @@ class CustomMetricsCallback(BaseCallback):
             
             # Check if episode is done
             if self.locals.get('dones', [False])[0]:
-                print(f"Last Angle diff: {info['other'].get('angle_delta', None)}")
                 print(f"Highest episode reward value: {self.highest_ep_rew}")
                 print(f"Lowest episode reward value: {self.lowest_ep_rew}")
                 self.highest_ep_rew = 0.0
@@ -103,7 +102,7 @@ class CustomMetricsCallback(BaseCallback):
                 # Track stage 2 successes (if any episode stage reached 2)
                 if len(self.episode_stages) > 0:
                     stage_2_reached = any(s == 2 for s in self.episode_stages)
-                    self.stage_2_success = 1 if self.stage_2_reached else 0
+                    self.stage_2_success = 1 if stage_2_reached else 0
                     self.logger.record('progress/stage_2_success', self.stage_2_success)
                 
                 
@@ -124,8 +123,8 @@ class CustomMetricsCallback(BaseCallback):
                     self.logger.record('metrics/mean_phi', np.mean(self.episode_phis))
                     
                 if len(self.episode_stages) > 0:
-                    stage_1_reached = any(s == 1 for s in self.episode_stages)
-                    self.stage_1_complete = 1 if stage_1_reached else 0
+                    # stage_1_reached = self.episode_stages[-1]
+                    self.stage_1_complete = any(s >= 1 for s in self.episode_stages)
                     self.logger.record('progress/stage_1_complete', self.stage_1_complete)
                 
                 # Dump metrics with episode number as the step counter for TensorBoard
@@ -142,8 +141,6 @@ class CustomMetricsCallback(BaseCallback):
                 self.episode_cumulative_reward = 0.0
                 self.episode_reward_components = {
                     "total_reward": 0.0,
-                    "angle_improvement": 0.0,
-                    "distance_improvement": 0.0,
                     "proximity_reward": 0.0,
                     "alignment_reward": 0.0,
                     "stage_bonus": 0.0,
@@ -157,15 +154,15 @@ class CustomMetricsCallback(BaseCallback):
         obs = self.locals.get('new_obs', None)
         if obs is not None and len(obs) > 0:
             # Extract metrics from flattened observation
-            # Indices depend on observation structure: [truck_pose(3), trailer_pose(3), parking_pose(3), 
-            # truck_parking_pose(3), current_stage(1), distance(1), angle_diff(1), jackknife(1), phi(1), 
-            # parallel_dist(1), longitudinal_dist(1), radar_data(30)]
+            # Indices depend on observation structure from gym.spaces.Dict in parking_env2:
+            # [current_stage(1), distance_to_target(1), angle_difference(1), 
+            # jackknife_angle(1), phi(1), radar_data(NUM_RADARS)]
             
-            distance = obs[0][13] if len(obs[0]) > 13 else None  # distance_to_target
-            angle_diff = obs[0][14] if len(obs[0]) > 14 else None  # angle_difference
-            jackknife = obs[0][15] if len(obs[0]) > 15 else None  # jackknife_angle
-            phi = obs[0][16] if len(obs[0]) > 16 else None  # phi
-            stage = obs[0][12] if len(obs[0]) > 12 else None  # current_stage
+            stage = obs[0][0] if len(obs[0]) > 0 else None  # current_stage
+            distance = obs[0][1] if len(obs[0]) > 1 else None  # distance_to_target
+            angle_diff = obs[0][2] if len(obs[0]) > 2 else None  # angle_difference
+            jackknife = obs[0][3] if len(obs[0]) > 3 else None  # jackknife_angle
+            phi = obs[0][4] if len(obs[0]) > 4 else None  # phi
             
             if distance is not None:
                 self.episode_distances.append(distance)

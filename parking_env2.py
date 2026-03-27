@@ -119,7 +119,7 @@ class ParkingLotEnv(gym.Env):
         self.stage_1_completed = False
         
         # Stage transition thresholds
-        self.stage_1_distance_threshold = 0.0375  # meters
+        self.stage_1_distance_threshold = 0.025  # meters
         self.stage_1_angle_threshold = 0.0555    # degrees
 
         # Reward calculation parameters
@@ -142,13 +142,13 @@ class ParkingLotEnv(gym.Env):
 
         self.init_distance = None
 
-    def _safe_world_tick(self, context="step", timeout=1.0, retries=2):
+    def _safe_world_tick(self, context="step", timeout=2.0, retries=2):
         """Tick with timeout/retry so training cannot hang forever on stalled frames."""
         last_error = None
         for attempt in range(1, retries + 1):
             try:
                 try:
-                    self.world.tick(timeout=timeout)
+                    self.world.tick(secondseconds=timeout)
                 except TypeError:
                     # Older CARLA builds may not expose timeout argument.
                     self.world.tick()
@@ -171,9 +171,7 @@ class ParkingLotEnv(gym.Env):
         self.destroy_actors()
         self.collision_truck_history.clear()
         self.collision_trailer_history.clear()
-        for q in self.obstacle_queues:
-            while not q.empty():
-                q.get()
+        self.obstacle_queues = [queue.Queue() for _ in range(NUM_RADARS)]
         
         # Reset stage tracking
         self.current_stage = 0
@@ -369,9 +367,7 @@ class ParkingLotEnv(gym.Env):
         # 3.5 Check for stage transition (Stage 1 -> Stage 2)
         if self.current_stage == 0 and not self.stage_1_completed:
             dist_to_truck_parking = float(obs["distance_to_target"][0])
-            
-            yaw_diff = float(obs["angle_difference"][0])
-            
+                        
             # Check if trailer reached the positioning point
             if dist_to_truck_parking < self.stage_1_distance_threshold:
                 self.current_stage = 1
@@ -391,7 +387,7 @@ class ParkingLotEnv(gym.Env):
             print(f"Collision detected! {self.collision_trailer_history[-1].other_actor if len(self.collision_trailer_history) > 0 else self.collision_truck_history[-1].other_actor}")
         
         # Check how long the simulation has been running
-        if time.perf_counter() - self.strt > 130:
+        if time.perf_counter() - self.strt > 110:
             terminated = True
             reward = -1.0  # Timeout penalty
             print("Simulation run for too long!")
@@ -422,7 +418,7 @@ class ParkingLotEnv(gym.Env):
         up = spectator_transform.get_up_vector()
         
         # Calculate HUD position (5m forward, 2m left, 2m up from camera)
-        hud_location = spectator_transform.location + forward * 5.0 - right * 2.0 + up * 2.0
+        hud_location = spectator_transform.location + forward * 5.0 - right * 0 + up * 0
         
         distance_to_target = float(obs["distance_to_target"][0])
         phi = float(obs["phi"][0])
@@ -434,9 +430,7 @@ class ParkingLotEnv(gym.Env):
         text = f"{stage_name}\nDistance: {distance_to_target:.2f}m\nAngle diff: {angle_diff_val:.2f}°\n\
         Phi: {phi:.2f}°\nJackknife: {jackknife:.2f}°\nReward: {reward:.3f}.\n\
         Angle_Rew: {rew_comp['alignment_reward']:.3f}\n\
-        Angle_Imp_Rew: {rew_comp['angle_improvement']:.3f}\n\
         Dist_Rew: {rew_comp['proximity_reward']:.3f}\n\
-        Dist_Imp_Rew: {rew_comp['distance_improvement']:.3f}\n\
         Jackknife_Pen: {rew_comp['jackknife_penalty']:.3f}"
         self.world.debug.draw_string(
             hud_location,
@@ -462,7 +456,7 @@ class ParkingLotEnv(gym.Env):
         jackknife = float(obs["jackknife_angle"][0])
         
         # Proximity reward
-        proximity_reward = 0.5 * (1 - (distance /  self.init_distance) ** 2)
+        proximity_reward = 0.5 * np.cos(np.pi * distance ** (np.log(0.5) / np.log(self.init_distance)))
         
         # Reward for alignment
         y_pre = (1 - distance) * np.cos(2 * math.pi * angle_diff - math.pi)
@@ -551,7 +545,6 @@ class ParkingLotEnv(gym.Env):
                     self.client.apply_batch([carla.command.DestroyActor(actor.id) for actor in alive_actors])
                 except RuntimeError as async_error:
                     print(f"Non-blocking batch destroy also failed: {async_error}")
-                    kill_carla()
 
         self.actor_list.clear()
     

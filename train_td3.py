@@ -2,12 +2,12 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env import ParkingLotEnv
+from parking_env2 import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
 from stable_baselines3.common.callbacks import CheckpointCallback
-from metrics_callback import CustomMetricsCallback
+from metrics_callback2 import CustomMetricsCallback
 import os
 import json
 import torch
@@ -20,7 +20,7 @@ pb = PushBullet(access_token)
 
 # # --- Configuration ---
 LOG_DIR = "logs/"
-MODEL_SAVE_PATH = "models/td3_parking/"
+MODEL_SAVE_PATH = "models/td3_parking_2/"
 EPISODE_STATE_FILE = os.path.join(MODEL_SAVE_PATH, "episode_state.json")
 REPLAY_BUFFER_FILE = os.path.join(MODEL_SAVE_PATH, "td3_replay_buffer.pkl")
 TOTAL_TIMESTEPS = 1000000  # Increased for complex parking task
@@ -220,11 +220,10 @@ def main():
             callback=callback,  # Use combined callbacks
             log_interval=10,  # Print stats every 10 episodes
             reset_num_timesteps=not resume_training,  # Continue timestep count when resuming
-            tb_log_name="td3_parking"  # Use consistent log name for TensorBoard
+            tb_log_name="td3_parking_2"  # Use consistent log name for TensorBoard
         )
     except Exception as e:
         print(f"An error occurred during training: {e}")
-        subprocess.run(['pkill', '-9', '-f', 'CarlaUE4'], check=False)
     finally:
         # 5. Clean up and save
         print("--- Training Finished ---")
