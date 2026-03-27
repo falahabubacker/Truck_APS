@@ -49,47 +49,40 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+find_carla_pids() {
+    # Supports packaged CARLA (CarlaUE4) and source builds (UE4Editor with CarlaUE4 project).
+    pgrep -f "CarlaUE4.sh|CarlaUE4-Linux-Shipping|(^|/)CarlaUE4( |$)|UE4Editor.*CarlaUE4" || true
+}
+
 get_carla_memory_gb() {
-    # Try multiple patterns to find CARLA process
-    local pid=""
-    
-    # Pattern 1: Direct CarlaUE4 binary
-    pid=$(pgrep -x "CarlaUE4")
-    
-    if [ -z "$pid" ]; then
+    local pids
+    pids="$(find_carla_pids)"
+
+    if [ -z "$pids" ]; then
         echo "0"
         return
     fi
-    
-    # Get memory from /proc/[pid]/status (VmRSS is resident set size in KB)
-    if [ -f "/proc/$pid/status" ]; then
-        local rss_kb=$(grep "^VmRSS:" "/proc/$pid/status" 2>/dev/null | awk '{print $2}')
-        if [ -n "$rss_kb" ] && [ "$rss_kb" != "0" ]; then
-            local rss_gb=$(echo "scale=2; $rss_kb / 1024 / 1024" | bc)
-            echo "$rss_gb"
-            return
-        fi
-    fi
-    
-    # Fallback to ps
-    local rss_kb=$(ps -p "$pid" -o rss= 2>/dev/null | tr -d ' ')
+
+    # Sum RSS over all CARLA-related processes so monitor reflects real usage.
+    local rss_kb
+    rss_kb=$(ps -p "$pids" -o rss= 2>/dev/null | awk '{s+=$1} END {print s+0}')
     if [ -z "$rss_kb" ] || [ "$rss_kb" = "0" ]; then
         echo "0"
         return
     fi
-    
+
     local rss_gb=$(echo "scale=2; $rss_kb / 1024 / 1024" | bc)
     echo "$rss_gb"
 }
 
 monitor_memory() {
-    log_info "Memory monitor started (threshold: ${MEMORY_THRESHOLD_GB}GB, check interval: ${MEMORY_CHECK_INTERVAL}s)"
+    # log_info "Memory monitor started (threshold: ${MEMORY_THRESHOLD_GB}GB, check interval: ${MEMORY_CHECK_INTERVAL}s)"
     
     while true; do
         sleep "$MEMORY_CHECK_INTERVAL"
         
         # Check if CARLA is still alive
-        if ! pgrep -f "CarlaUE4" >/dev/null 2>&1; then
+        if [ -z "$(find_carla_pids)" ]; then
             log_info "CARLA process no longer running, exiting monitor"
             break
         fi
@@ -122,7 +115,7 @@ run_iteration() {
     # Start CARLA with memory cap
     log_info "Starting CARLA..."
     systemd-run --user --scope -p MemoryMax=16G \
-        "$CARLA_BIN" -RenderOffScreen \
+        "$CARLA_BIN" -RenderOffScreen -quality-level=Medium \
         >"$CARLA_LOG" 2>&1 &
     
     local carla_pid=$!
