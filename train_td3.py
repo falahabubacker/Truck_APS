@@ -2,7 +2,7 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env2 import ParkingLotEnv
+from parking_env3 import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise

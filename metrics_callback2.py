@@ -28,6 +28,8 @@ class CustomMetricsCallback(BaseCallback):
         self.episode_cumulative_reward = 0.0
         self.stage_1_complete = 0
         self.stage_2_success = 0
+        self.episode_stage_1_complete = False
+        self.episode_stage_2_success = False
         self.episode_step_count = 0
         # region newly added
         self.noise_sigma_init = noise_sigma_init
@@ -52,9 +54,16 @@ class CustomMetricsCallback(BaseCallback):
         self.highest_ep_rew = max(rewards[0], self.highest_ep_rew)
         self.lowest_ep_rew = min(rewards[0], self.lowest_ep_rew)
 
-        # Get the current observation from the environment
+        # Get info from current step safely.
+        info = {}
         if len(self.locals.get('infos', [])) > 0:
-            info = self.locals['infos'][0]
+            info = self.locals['infos'][0] or {}
+
+        progress = info.get("progress", {})
+        if progress.get("stage_1_complete", 0):
+            self.episode_stage_1_complete = True
+        if progress.get("stage_2_success", 0):
+            self.episode_stage_2_success = True
 
         if len(rewards) > 0:
             self.episode_step_count += 1
@@ -99,11 +108,9 @@ class CustomMetricsCallback(BaseCallback):
                 self.logger.record('reward/jackknife_total', jackknife_total)
                 # self.logger.record('reward/time_penalty_total', time_pen_total)
 
-                # Track stage 2 successes (if any episode stage reached 2)
-                if len(self.episode_stages) > 0:
-                    stage_2_reached = any(s == 2 for s in self.episode_stages)
-                    self.stage_2_success = 1 if stage_2_reached else 0
-                    self.logger.record('progress/stage_2_success', self.stage_2_success)
+                # Log progress metrics from explicit env info flags.
+                self.stage_2_success = int(self.episode_stage_2_success)
+                self.logger.record('progress/stage_2_success', self.stage_2_success)
                 
                 
                 if len(self.episode_distances) > 0:
@@ -121,11 +128,10 @@ class CustomMetricsCallback(BaseCallback):
                     
                 if len(self.episode_phis) > 0:
                     self.logger.record('metrics/mean_phi', np.mean(self.episode_phis))
-                    
-                if len(self.episode_stages) > 0:
-                    # stage_1_reached = self.episode_stages[-1]
-                    self.stage_1_complete = any(s >= 1 for s in self.episode_stages)
-                    self.logger.record('progress/stage_1_complete', self.stage_1_complete)
+                
+                # Always update stage_1_complete from explicit env info flags.
+                self.stage_1_complete = int(self.episode_stage_1_complete)
+                self.logger.record('progress/stage_1_complete', self.stage_1_complete)
                 
                 # Dump metrics with episode number as the step counter for TensorBoard
                 # This makes the "Step" axis in TensorBoard represent episodes
@@ -137,6 +143,8 @@ class CustomMetricsCallback(BaseCallback):
                 self.episode_jackknifes = []
                 self.episode_phis = []
                 self.episode_stages = []
+                self.episode_stage_1_complete = False
+                self.episode_stage_2_success = False
                 self.episode_step_count = 0
                 self.episode_cumulative_reward = 0.0
                 self.episode_reward_components = {
