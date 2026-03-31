@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CARLA_BIN="/mnt/HDD2TB/carla/Dist/CARLA_Shipping_0.9.14-dirty/LinuxNoEditor/CarlaUE4.sh"
 CARLA_LOG="$SCRIPT_DIR/carla_watchdog.log"
-PYTHON_SCRIPT="$SCRIPT_DIR/train_td3_2.py"
+PYTHON_SCRIPT="$SCRIPT_DIR/train_td3_3.py"
 VENV_PY="$SCRIPT_DIR/venv3.10/bin/python"
 
 MEMORY_THRESHOLD_GB=12
@@ -36,8 +36,8 @@ cleanup() {
         kill "$MONITOR_PID" 2>/dev/null || true
     fi
     # Interrupt Python training gracefully (SIGINT)
-    if pgrep -f "train_td3_2.py" >/dev/null 2>&1; then
-        pkill -INT -f "train_td3_2.py" || true
+    if pgrep -f "train_td3_3.py" >/dev/null 2>&1; then
+        pkill -INT -f "train_td3_3.py" || true
         sleep 5
     fi
     # Kill CARLA
@@ -173,17 +173,17 @@ PY
     fi
     
     # Send graceful interrupt and wait for Python process to fully stop
-    if pgrep -f "train_td3_2.py" >/dev/null 2>&1; then
+    if pgrep -f "train_td3_3.py" >/dev/null 2>&1; then
         log_info "Sending SIGINT to training script for graceful shutdown..."
-        pkill -INT -f "train_td3_2.py" || true
+        pkill -INT -f "train_td3_3.py" || true
         
         # Wait for process to actually terminate
         local max_wait=15
         local waited=0
-        while pgrep -f "train_td3_2.py" >/dev/null 2>&1; do
+        while pgrep -f "train_td3_3.py" >/dev/null 2>&1; do
             if [ $waited -ge $max_wait ]; then
                 log_warn "Python script did not terminate gracefully in ${max_wait}s, force killing..."
-                pkill -9 -f "train_td3_2.py" || true
+                pkill -9 -f "train_td3_3.py" || true
                 break
             fi
             log_info "Waiting for Python script to stop... (${waited}s/${max_wait}s)"
