@@ -2,7 +2,7 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from gymnasium.wrappers import FlattenObservation
-from parking_env5 import ParkingLotEnv
+from parking_env6 import ParkingLotEnv
 import numpy as np
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
@@ -20,7 +20,7 @@ pb = PushBullet(access_token)
 
 # # --- Configuration ---
 LOG_DIR = "logs/"
-MODEL_SAVE_PATH = "models/td3_parking_4/"
+MODEL_SAVE_PATH = "models/td3_parking_5/"
 EPISODE_STATE_FILE = os.path.join(MODEL_SAVE_PATH, "episode_state.json")
 REPLAY_BUFFER_FILE = os.path.join(MODEL_SAVE_PATH, "td3_replay_buffer.pkl")
 TOTAL_TIMESTEPS = 1000000  # Increased for complex parking task
@@ -32,7 +32,7 @@ SAVE_FREQ = 25000  # Save less frequently with longer training
 # Hyperparameters from Table 6 (TD3)
 ACTOR_LR = 0.0001  # Actor network learning rate
 CRITIC_LR = 0.001  # Critic network learning rate
-GAMMA = 0.80  # Increased discount for long-horizon task
+GAMMA = 0.95  # Increased discount for long-horizon task
 TAU = 0.001  # Slower target updates for stability
 NOISE_SIGMA = 0.4  # Reduced exploration noise for simpler state
 NOISE_SIGMA_FINAL = 0.03  # Final exploration noise after decay
@@ -220,7 +220,7 @@ def main():
             callback=callback,  # Use combined callbacks
             log_interval=10,  # Print stats every 10 episodes
             reset_num_timesteps=not resume_training,  # Continue timestep count when resuming
-            tb_log_name="td3_parking_4"  # Use consistent log name for TensorBoard
+            tb_log_name="td3_parking_5"  # Use consistent log name for TensorBoard
         )
     except Exception as e:
         print(f"An error occurred during training: {e}")

@@ -120,7 +120,7 @@ run_iteration() {
     # Start CARLA with memory cap
     log_info "Starting CARLA..."
     systemd-run --user --scope -p MemoryMax=16G \
-        "$CARLA_BIN" -RenderOffScreen -quality-level=Medium \
+        "$CARLA_BIN" \
         >"$CARLA_LOG" 2>&1 &
     
     local carla_pid=$!
