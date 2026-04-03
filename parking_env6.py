@@ -449,7 +449,7 @@ class ParkingLotEnv(gym.Env):
             yaw_diff = (trailer_yaw - parking_yaw + 180) % 360 - 180
             
             # If we are within 1 meter and 10 degrees, we win!
-            if dist_to_target < 1.0 and abs(yaw_diff) < 15.0:
+            if dist_to_target < 1.0 and abs(yaw_diff) < 20.0:
                 terminated = True
                 reward = 1.0  # Big positive reward for success!
                 stage_2_success = 1
